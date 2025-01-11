@@ -1,0 +1,56 @@
+# Node.js dependencies
+node_modules/
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+
+# Logs
+logs/
+*.log
+debug.log
+error.log
+*.pid
+*.seed
+*.pid.lock
+
+# Environment variables
+.env
+.env.local
+.env.*.local
+
+# Build artifacts
+dist/
+build/
+
+# Cache and output
+.cache/
+coverage/
+tmp/
+*.tmp
+*.temp
+
+# IDEs and editors
+.idea/
+.vscode/
+*.swp
+*~
+*.sublime-workspace
+
+# Operating system files
+.DS_Store
+Thumbs.db
+*.iml
+
+# AWS and sensitive files
+*.pem
+.aws/
+.aws-sam/
+*.zip
+
+# Elastic Beanstalk
+.elasticbeanstalk/
+
+# Miscellaneous
+*.bak
+*.orig
+*.lock
