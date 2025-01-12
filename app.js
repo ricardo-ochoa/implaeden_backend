@@ -1,24 +1,24 @@
 const express = require('express');
 const bodyParser = require('body-parser');
-const cors = require('cors'); // Importa el middleware CORS
+const cors = require('cors');
 const pacienteRoutes = require('./routes/pacientes');
 const testRoutes = require('./routes/test');
 require('dotenv').config();
 
 const app = express();
 
-// Middleware
+// Middleware para analizar JSON
 app.use(bodyParser.json());
 
 // Configuración de CORS
 app.use(
   cors({
     origin: [
-        'http://localhost:3000', // Para desarrollo local
-        'https://implaeden.vercel.app', // Para producción en Vercel
-      ],
-    methods: ['GET', 'POST', 'PUT', 'DELETE'],
-    allowedHeaders: ['Content-Type', 'Authorization'],
+      'http://localhost:3000', // Permite solicitudes desde tu frontend local
+      'https://implaeden.vercel.app', // Permite solicitudes desde Vercel en producción
+    ],
+    methods: ['GET', 'POST', 'PUT', 'DELETE'], // Métodos HTTP permitidos
+    allowedHeaders: ['Content-Type', 'Authorization'], // Encabezados permitidos
   })
 );
 
