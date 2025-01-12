@@ -27,5 +27,4 @@ app.use((err, req, res, next) => {
       error: 'Ocurrió un error en el servidor',
       details: err.message,
     });
-  });
-  
+});  
