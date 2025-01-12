@@ -1,14 +1,14 @@
 const express = require('express');
-const bodyParser = require('body-parser');
 const cors = require('cors');
 const pacienteRoutes = require('./routes/pacientes');
 const testRoutes = require('./routes/test');
+const uploadRoutes = require('./routes/uploads');
 require('dotenv').config();
 
 const app = express();
 
 // Middleware para analizar JSON
-app.use(bodyParser.json());
+app.use(express.json());
 
 // Configuración de CORS
 app.use(
@@ -22,8 +22,18 @@ app.use(
   })
 );
 
+// Responde a las solicitudes OPTIONS para todas las rutas
+app.options('*', cors());
+
+// Middleware de depuración (opcional)
+app.use((req, res, next) => {
+  console.log(`Solicitud recibida: ${req.method} ${req.path}`);
+  next();
+});
+
 // Rutas
 app.use('/api/pacientes', pacienteRoutes);
+app.use('/api/uploads', uploadRoutes);
 app.use('/api/test', testRoutes);
 
 // Inicio del servidor
