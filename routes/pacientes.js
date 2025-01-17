@@ -118,23 +118,46 @@ router.post(
 
 // Actualizar un paciente
 router.put(
-  '/:id',
-  asyncHandler(async (req, res) => {
-    const { id } = req.params;
-    const { nombre, apellidos, telefono, fecha_nacimiento, email, direccion, foto_perfil_url } = req.body;
-
-    const [result] = await db.query(
-      'UPDATE pacientes SET nombre = ?, apellidos = ?, telefono = ?, fecha_nacimiento = ?, email = ?, direccion = ?, foto_perfil_url = ? WHERE id = ?',
-      [nombre, apellidos, telefono, fecha_nacimiento, email, direccion, foto_perfil_url, id]
-    );
-
-    if (result.affectedRows === 0) {
-      return res.status(404).json({ error: 'Paciente no encontrado' });
-    }
-
-    res.json({ message: 'Paciente actualizado exitosamente.' });
-  })
-);
+    '/:id',
+    upload.single('foto'),
+    asyncHandler(async (req, res) => {
+      const { id } = req.params;
+      const {
+        nombre,
+        apellidos,
+        telefono,
+        fecha_nacimiento,
+        email,
+        direccion,
+        eliminarFoto, // Campo para eliminar la imagen
+      } = req.body;
+  console.log(req.body)
+      let fotoPerfilUrl = null;
+  
+      if (req.file) {
+        // Subir una nueva imagen si se proporciona
+        fotoPerfilUrl = await uploadFileToS3(req.file);
+      } else if (eliminarFoto === 'true') {
+        // Si se solicita explícitamente eliminar la imagen
+        fotoPerfilUrl = null;
+      } else {
+        // Mantener la URL existente si no se proporciona un nuevo archivo ni se solicita eliminar
+        const [existingPatient] = await db.query('SELECT foto_perfil_url FROM pacientes WHERE id = ?', [id]);
+        fotoPerfilUrl = existingPatient[0]?.foto_perfil_url || null;
+      }
+  
+      const [result] = await db.query(
+        'UPDATE pacientes SET nombre = ?, apellidos = ?, telefono = ?, fecha_nacimiento = ?, email = ?, direccion = ?, foto_perfil_url = ? WHERE id = ?',
+        [nombre, apellidos, telefono, fecha_nacimiento, email, direccion, fotoPerfilUrl, id]
+      );
+  
+      if (result.affectedRows === 0) {
+        return res.status(404).json({ error: 'Paciente no encontrado' });
+      }
+  
+      res.json({ message: 'Paciente actualizado exitosamente.' });
+    })
+  );
 
 // Eliminar un paciente
 router.delete(

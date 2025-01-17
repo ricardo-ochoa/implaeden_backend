@@ -9,21 +9,31 @@ const app = express();
 
 // Middleware para analizar JSON
 app.use(express.json());
+app.use(express.urlencoded({ extended: true })); // Manejar datos en formato URL-encoded
+
 
 // Configuración de CORS
 app.use(
-  cors({
+    cors({
+      origin: ['http://localhost:3000', 'https://implaeden.vercel.app'], // Orígenes permitidos
+      methods: ['GET', 'POST', 'PUT', 'DELETE'], // Métodos permitidos
+      allowedHeaders: ['Content-Type', 'Authorization'], // Headers permitidos
+    })
+  );
+  
+const corsOptions = {
     origin: [
-      'http://localhost:3000', // Permite solicitudes desde tu frontend local
-      'https://implaeden.vercel.app', // Permite solicitudes desde Vercel en producción
+      'http://localhost:3000', // Origen del frontend en desarrollo
+      'https://implaeden.vercel.app', // Origen del frontend en producción
     ],
-    methods: ['GET', 'POST', 'PUT', 'DELETE'], // Métodos HTTP permitidos
-    allowedHeaders: ['Content-Type', 'Authorization'], // Encabezados permitidos
-  })
-);
+    methods: ['GET', 'POST', 'PUT', 'DELETE', 'OPTIONS'], // Métodos permitidos
+    allowedHeaders: ['Content-Type', 'Authorization'], // Headers permitidos
+    credentials: true, // Permitir cookies/sesiones si las usas
+  };
 
 // Responde a las solicitudes OPTIONS para todas las rutas
 app.options('*', cors());
+app.options('*', cors(corsOptions));
 
 // Middleware de depuración (opcional)
 app.use((req, res, next) => {
