@@ -1,6 +1,7 @@
 const express = require('express');
 const cors = require('cors');
 const pacienteRoutes = require('./routes/pacientes');
+const clinicalHistoryRoutes = require('./routes/clinicalHistories');
 const testRoutes = require('./routes/test');
 const uploadRoutes = require('./routes/uploads');
 require('dotenv').config();
@@ -44,6 +45,7 @@ app.use((req, res, next) => {
 // Rutas
 app.use('/api/pacientes', pacienteRoutes);
 app.use('/api/uploads', uploadRoutes);
+app.use('/api/clinical-histories', clinicalHistoryRoutes);
 app.use('/api/test', testRoutes);
 
 // Inicio del servidor
