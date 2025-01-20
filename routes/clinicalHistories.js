@@ -23,25 +23,27 @@ const upload = multer({ storage: multer.memoryStorage() });
 
 // Función para subir archivos a S3
 const uploadFileToS3 = async (file) => {
-  const fileName = `clinical_histories/${Date.now()}_${file.originalname}`;
-  const params = {
-    Bucket: 'implaeden',
-    Key: fileName,
-    Body: file.buffer,
-    ContentType: file.mimetype,
-    ACL: 'public-read',
-  };
-
-  try {
-    const uploadResult = await s3.upload(params).promise();
-    const fileUrl = `https://${params.Bucket}.s3.${process.env.AWS_REGION}.amazonaws.com/${fileName}`;
-    console.log('Archivo subido a S3:', fileUrl);
-    return fileUrl;
-  } catch (error) {
-    console.error('Error al subir a S3:', error);
-    throw new Error('Error al subir el archivo a S3.');
-  }
-};
+    const fileName = `clinical_histories/${Date.now()}_${file.originalname}`;
+    const params = {
+      Bucket: 'implaeden',
+      Key: fileName,
+      Body: file.buffer,
+      ContentType: file.mimetype,
+    };
+  
+    try {
+      const uploadResult = await s3.upload(params).promise();
+      const fileUrl = `https://${params.Bucket}.s3.${process.env.AWS_REGION}.amazonaws.com/${fileName}`;
+      console.log('Archivo subido a S3:', fileUrl);
+      return fileUrl;
+    } catch (error) {
+      console.error('Error al subir a S3:', error);
+      if (error.code === 'AccessControlListNotSupported') {
+        console.error('El bucket no soporta ACLs. Verifica la configuración del bucket.');
+      }
+      throw new Error('Error al subir el archivo a S3.');
+    }
+  };  
 
 // Obtener todos los historiales clínicos de un paciente
 router.get(
