@@ -4,6 +4,7 @@ const pacienteRoutes = require('./routes/pacientes');
 const clinicalHistoryRoutes = require('./routes/clinicalHistories');
 const testRoutes = require('./routes/test');
 const uploadRoutes = require('./routes/uploads');
+const servicioRoutes = require('./routes/servicios'); 
 require('dotenv').config();
 
 const app = express();
@@ -47,6 +48,7 @@ app.use('/api/pacientes', pacienteRoutes);
 app.use('/api/uploads', uploadRoutes);
 app.use('/api/clinical-histories', clinicalHistoryRoutes);
 app.use('/api/test', testRoutes);
+app.use('/api/servicios', servicioRoutes);
 
 // Inicio del servidor
 const PORT = process.env.PORT || 4000;

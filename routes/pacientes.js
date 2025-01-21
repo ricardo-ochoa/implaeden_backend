@@ -36,8 +36,6 @@ const uploadFileToS3 = async (file) => {
   
       // Construir manualmente la URL base
       const fileUrl = `https://${params.Bucket}.s3.${process.env.AWS_REGION}.amazonaws.com/${fileName}`;
-  
-      console.log('Archivo subido a S3:', fileUrl);
       return fileUrl;
     } catch (error) {
       console.error('Error al subir a S3:', error);
@@ -131,7 +129,6 @@ router.put(
         direccion,
         eliminarFoto, // Campo para eliminar la imagen
       } = req.body;
-  console.log(req.body)
       let fotoPerfilUrl = null;
   
       if (req.file) {
@@ -173,5 +170,35 @@ router.delete(
     res.json({ message: 'Paciente eliminado exitosamente.' });
   })
 );
+
+router.get(
+  '/:id/tratamientos',
+  asyncHandler(async (req, res) => {
+    const { id } = req.params;
+
+    const query = `
+      SELECT 
+        ps.id AS treatment_id, 
+        ps.service_date, 
+        ps.notes, 
+        s.name AS service_name, 
+        s.category AS service_category
+      FROM patient_services ps
+      INNER JOIN services s ON ps.service_id = s.id
+      WHERE ps.patient_id = ?
+      ORDER BY ps.service_date DESC
+    `;
+
+    try {
+      const [rows] = await db.query(query, [id]);
+      res.json(rows);
+    } catch (err) {
+      console.error('Error al obtener tratamientos:', err);
+      res.status(500).json({ error: 'Error al obtener tratamientos del paciente.' });
+    }
+  })
+);
+
+
 
 module.exports = router;
