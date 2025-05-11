@@ -137,9 +137,8 @@ router.get(
     const query = `
       SELECT 
         ps.id AS treatment_id, 
-        ps.service_date, 
-        ps.notes, 
-        ps.status,   
+        ps.service_date,
+        ps.status,
         s.name AS service_name, 
         s.category AS service_category
       FROM patient_services ps
