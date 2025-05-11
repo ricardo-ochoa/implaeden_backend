@@ -139,6 +139,7 @@ router.get(
         ps.id AS treatment_id, 
         ps.service_date, 
         ps.notes, 
+        ps.status,   
         s.name AS service_name, 
         s.category AS service_category
       FROM patient_services ps
@@ -183,7 +184,7 @@ router.get('/tratamientos/:treatmentId/documentos', asyncHandler(async (req, res
     [treatmentId]
   );
 
-  res.json(rows);
+res.json(rows);
 }));
 
 // Crear un nuevo documento relacionado con un tratamiento
@@ -218,6 +219,55 @@ router.post(
       }
     })
   );
+
+  // Eliminar un tratamiento (registro de patient_services)
+router.delete(
+  '/tratamientos/:id',
+  asyncHandler(async (req, res) => {
+    const { id } = req.params;
+
+    // Verifica si existen documentos asociados primero (opcional: puedes borrarlos en cascada)
+    const [docs] = await db.query(
+      'SELECT id FROM service_documents WHERE patient_service_id = ?',
+      [id]
+    );
+
+    if (docs.length > 0) {
+      return res.status(400).json({ error: 'Este tratamiento tiene documentos asociados. Elimínalos primero.' });
+    }
+
+    const [result] = await db.query('DELETE FROM patient_services WHERE id = ?', [id]);
+
+    if (result.affectedRows === 0) {
+      return res.status(404).json({ error: 'Tratamiento no encontrado.' });
+    }
+
+    res.json({ message: 'Tratamiento eliminado exitosamente.' });
+  })
+);
+
+router.put('/tratamientos/:id/status', asyncHandler(async (req, res) => {
+  const { id } = req.params;
+  const { status } = req.body;
+
+  const validStatuses = ['Por Iniciar', 'En proceso', 'Terminado'];
+  if (!validStatuses.includes(status)) {
+    return res.status(400).json({ error: 'Estado no válido.' });
+  }
+
+  const [result] = await db.query(
+    'UPDATE patient_services SET status = ?, updated_at = NOW() WHERE id = ?',
+    [status, id]
+  );
+
+  if (result.affectedRows === 0) {
+    return res.status(404).json({ error: 'Tratamiento no encontrado.' });
+  }
+
+  res.json({ message: 'Estado actualizado exitosamente.' });
+}));
+
+
 
   // Eliminar un documento relacionado con un tratamiento
 router.delete('/documentos/:id', asyncHandler(async (req, res) => {
