@@ -7,6 +7,7 @@ const uploadRoutes = require('./routes/uploads');
 const servicioRoutes = require('./routes/servicios'); 
 const paymentsRoutes = require('./routes/payments');
 const emailRoutes = require('./routes/email');
+const treatmentEvidences = require('./routes/treatmentEvidences');
 require('dotenv').config();
 
 const app = express();
@@ -53,6 +54,7 @@ app.use('/api/test', testRoutes);
 app.use('/api/servicios', servicioRoutes);
 app.use('/api/pacientes', paymentsRoutes);
 app.use('/api/email', emailRoutes);
+app.use('/api', treatmentEvidences);
 
 // Inicio del servidor
 const PORT = process.env.PORT || 4000;

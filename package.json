@@ -15,6 +15,7 @@
     "@aws-sdk/client-rds": "^3.726.1",
     "@aws-sdk/client-s3": "^3.726.1",
     "aws-sdk": "^2.1692.0",
+    "axios": "^1.10.0",
     "body-parser": "^1.20.3",
     "cors": "^2.8.5",
     "dotenv": "^16.4.7",
