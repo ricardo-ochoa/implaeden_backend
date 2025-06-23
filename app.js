@@ -54,7 +54,7 @@ app.use('/api/test', testRoutes);
 app.use('/api/servicios', servicioRoutes);
 app.use('/api/pacientes', paymentsRoutes);
 app.use('/api/email', emailRoutes);
-app.use('/api', treatmentEvidences);
+app.use('/api/pacientes', treatmentEvidences);
 
 // Inicio del servidor
 const PORT = process.env.PORT || 4000;
