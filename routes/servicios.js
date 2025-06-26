@@ -117,7 +117,13 @@ router.get(
   asyncHandler(async (req, res) => {
     const { patientId } = req.params;
     const [rows] = await db.query(
-      `SELECT ps.id, ps.service_date, ps.notes, s.name, s.category 
+      `SELECT 
+         ps.id                  AS treatment_id,
+         ps.service_date,
+         ps.notes,
+         ps.total_cost,               -- nuevo
+         s.name                AS service_name,
+         s.category            AS service_category
        FROM patient_services ps 
        INNER JOIN services s ON ps.service_id = s.id 
        WHERE ps.patient_id = ? 
@@ -129,43 +135,44 @@ router.get(
 );
 
 // Obtener tratamientos relacionados con un paciente
-router.get(
-  '/:id/tratamientos',
-  asyncHandler(async (req, res) => {
-    const { id } = req.params;
+router.get('/:id/tratamientos', asyncHandler(async (req, res) => {
+  const { id } = req.params;
 
-    const query = `
-      SELECT 
-        ps.id AS treatment_id, 
-        ps.service_date,
-        ps.status,
-        s.name AS service_name, 
-        s.category AS service_category
-      FROM patient_services ps
-      INNER JOIN services s ON ps.service_id = s.id
-      WHERE ps.patient_id = ?
-      ORDER BY ps.service_date DESC
-    `;
+  const query = `
+    SELECT 
+      ps.id           AS treatment_id, 
+      ps.service_date,
+      ps.status,
+      ps.total_cost  AS total_cost,  
+      s.name         AS service_name, 
+      s.category     AS service_category
+    FROM patient_services ps
+    INNER JOIN services s ON ps.service_id = s.id
+    WHERE ps.patient_id = ?
+    ORDER BY ps.service_date DESC
+  `;
 
-    const [rows] = await db.query(query, [id]);
-    res.json(rows);
-  })
-);
+  const [rows] = await db.query(query, [id]);
+  res.json(rows);
+}));
+
 
 // Asignar un servicio a un paciente
 router.post(
   '/patient/:patientId',
   asyncHandler(async (req, res) => {
     const { patientId } = req.params;
-    const { service_id, service_date, notes } = req.body;
+    const { service_id, service_date, notes, total_cost } = req.body;
 
-    if (!service_id || !service_date) {
+    if (!service_id || !service_date || total_cost == null) {
       return res.status(400).json({ error: 'El ID del servicio y la fecha son obligatorios.' });
     }
 
     const [result] = await db.query(
-      'INSERT INTO patient_services (patient_id, service_id, service_date, notes, created_at, updated_at) VALUES (?, ?, ?, ?, NOW(), NOW())',
-      [patientId, service_id, service_date, notes]
+      `INSERT INTO patient_services 
+        (patient_id, service_id, service_date, notes, total_cost, created_at, updated_at)
+      VALUES (?, ?, ?, ?, ?, NOW(), NOW())`,
+      [patientId, service_id, service_date, notes, parseFloat(total_cost)]
     );
 
     res.status(201).json({ message: 'Servicio asignado al paciente exitosamente.', id: result.insertId });
