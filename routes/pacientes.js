@@ -180,7 +180,8 @@ router.get(
       SELECT 
         ps.id AS treatment_id, 
         ps.service_date, 
-        ps.status, 
+        ps.status,
+        ps.total_cost     AS total_cost,   
         s.name AS service_name, 
         s.category AS service_category
       FROM patient_services ps
