@@ -1,68 +1,104 @@
+// app.js
 const express = require('express');
 const cors = require('cors');
+const passport = require('passport');
+require('dotenv').config();
+
+// Importar routers
+const authRoutes = require('./routes/auth');
+const treatmentEvidencesRoutes = require('./routes/treatmentEvidences');
 const pacienteRoutes = require('./routes/pacientes');
 const clinicalHistoryRoutes = require('./routes/clinicalHistories');
-const testRoutes = require('./routes/test');
-const uploadRoutes = require('./routes/uploads');
-const servicioRoutes = require('./routes/servicios'); 
+const servicioRoutes = require('./routes/servicios');
 const paymentsRoutes = require('./routes/payments');
 const emailRoutes = require('./routes/email');
-const treatmentEvidences = require('./routes/treatmentEvidences');
 const citasRoutes = require('./routes/citas');
-require('dotenv').config();
+const tratamientosRoutes = require('./routes/tratamientos');
+const uploadRoutes = require('./routes/uploads');
+const testRoutes = require('./routes/test');
+const { authenticateJwt }      = require('./middleware/auth');
 
 const app = express();
 
-// Middleware para analizar JSON
+// Middlewares globales
 app.use(express.json());
-app.use(express.urlencoded({ extended: true })); // Manejar datos en formato URL-encoded
-
+app.use(express.urlencoded({ extended: true }));
 
 // Configuración de CORS
-app.use(
-    cors({
-      origin: ['http://localhost:3000', 'https://implaeden.vercel.app'], // Orígenes permitidos
-      methods: ['GET', 'POST', 'PUT', 'DELETE'], // Métodos permitidos
-      allowedHeaders: ['Content-Type', 'Authorization'], // Headers permitidos
-    })
-  );
-  
 const corsOptions = {
-    origin: [
-      'http://localhost:3000', // Origen del frontend en desarrollo
-      'https://implaeden.vercel.app', // Origen del frontend en producción
-    ],
-    methods: ['GET', 'POST', 'PUT', 'DELETE', 'OPTIONS'], // Métodos permitidos
-    allowedHeaders: ['Content-Type', 'Authorization'], // Headers permitidos
-    credentials: true, // Permitir cookies/sesiones si las usas
-  };
-
-// Responde a las solicitudes OPTIONS para todas las rutas
-app.options('*', cors());
+  origin: [
+    'http://localhost:3000',
+    'https://implaeden.vercel.app',
+  ],
+  methods: ['GET', 'POST', 'PUT', 'DELETE', 'OPTIONS'],
+  allowedHeaders: ['Content-Type', 'Authorization'],
+  credentials: true,
+};
+app.use(cors(corsOptions));
 app.options('*', cors(corsOptions));
 
-// Middleware de depuración (opcional)
+// Inicializar Passport
+require('./auth/passport');
+app.use(passport.initialize());
+
+// Logging de solicitudes
 app.use((req, res, next) => {
-  console.log(`Solicitud recibida: ${req.method} ${req.path}`);
+  console.log(`→ ${req.method} ${req.originalUrl}`);
   next();
 });
 
-// Rutas
-app.use('/api/uploads', uploadRoutes);
-app.use('/api/clinical-histories', clinicalHistoryRoutes);
+// Rutas públicas
+app.use('/api/auth', authRoutes);
 app.use('/api/test', testRoutes);
-app.use('/api/servicios', servicioRoutes);
-app.use('/api/email', emailRoutes);
-app.use('/api/pacientes', pacienteRoutes);
-app.use('/api/pacientes', paymentsRoutes);
-app.use('/api/pacientes', treatmentEvidences);
-app.use('/api/pacientes', citasRoutes);
+app.use('/api/uploads', uploadRoutes);
 
-// Inicio del servidor
-const PORT = process.env.PORT || 4000;
-app.listen(PORT, () => {
-  console.log(`Servidor corriendo en el puerto ${PORT}`);
-});
+// Subrecursos de un paciente (montados antes que el CRUD genérico para evitar colisiones)
+app.use(
+  '/api/pacientes/:patientId/pagos',
+  authenticateJwt,
+  paymentsRoutes
+);
+
+app.use(
+  '/api/pacientes/:patientId/citas',
+  authenticateJwt,
+  citasRoutes
+);
+app.use(
+  '/api/pacientes/:patientId/tratamientos',
+  authenticateJwt,
+  tratamientosRoutes
+);
+
+app.use(
+  '/api/pacientes/:patientId/tratamientos/:treatmentId/evidencias',
+  authenticateJwt,
+  treatmentEvidencesRoutes
+);
+
+// Pacientes (CRUD principal)
+app.use(
+  '/api/pacientes',
+  authenticateJwt,
+  pacienteRoutes
+);
+
+// Otros recursos globales
+app.use(
+  '/api/clinical-histories',
+  authenticateJwt,
+  clinicalHistoryRoutes
+);
+app.use(
+  '/api/servicios',
+  authenticateJwt,
+  servicioRoutes
+);
+app.use(
+  '/api/email',
+  authenticateJwt,
+  emailRoutes
+);
 
 // Manejo global de errores
 app.use((err, req, res, next) => {
@@ -71,4 +107,10 @@ app.use((err, req, res, next) => {
     error: 'Ocurrió un error en el servidor',
     details: err.message,
   });
+});
+
+// Iniciar servidor
+const PORT = process.env.PORT || 4000;
+app.listen(PORT, () => {
+  console.log(`Servidor corriendo en puerto ${PORT}`);
 });

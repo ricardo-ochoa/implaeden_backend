@@ -1,6 +1,6 @@
 // routes/treatmentEvidences.js
 const express = require('express');
-const router = express.Router();
+const router = express.Router({ mergeParams: true });
 const AWS = require('aws-sdk');
 const multer = require('multer');
 const asyncHandler = fn => (req, res, next) =>
@@ -32,62 +32,48 @@ async function uploadFileToS3(file) {
 }
 
 // 4) GET: listar evidencias de un “patient_service”
-router.get(
-  '/:patientId/tratamientos/:treatmentId/evidencias',
-  asyncHandler(async (req, res) => {
-    const { treatmentId } = req.params;
-    const [rows] = await pool.query(
-      `SELECT id, patient_service_id, record_date, file_url, created_at
-         FROM treatment_evidences
-        WHERE patient_service_id = ?
-        ORDER BY record_date DESC`,
-      [treatmentId]
+router.get('/', asyncHandler(async (req, res) => {
+  const { treatmentId } = req.params;
+  const [rows] = await pool.query(
+    `SELECT id, patient_service_id, record_date, file_url, created_at
+       FROM treatment_evidences
+      WHERE patient_service_id = ?
+      ORDER BY record_date DESC`,
+    [treatmentId]
+  );
+  res.json(rows);
+}));
+
+// POST /api/pacientes/:patientId/tratamientos/:treatmentId/evidencias
+router.post('/', upload.array('files', 10), asyncHandler(async (req, res) => {
+  const { treatmentId } = req.params;
+  const { record_date } = req.body;
+  if (!req.files.length) {
+    return res.status(400).json({ error: 'Debes enviar al menos un archivo.' });
+  }
+  const urls = await Promise.all(req.files.map(uploadFileToS3));
+  for (const url of urls) {
+    await pool.query(
+      `INSERT INTO treatment_evidences
+         (patient_service_id, record_date, file_url, created_at, updated_at)
+       VALUES (?, ?, ?, NOW(), NOW())`,
+      [treatmentId, record_date || new Date(), url]
     );
-    res.json(rows);
-  })
-);
+  }
+  res.status(201).json({ message: 'Evidencias subidas correctamente.', urls });
+}));
 
-// 5) POST: subir nuevas evidencias
-router.post(
-  '/:patientId/tratamientos/:treatmentId/evidencias',
-  upload.array('files', 10),
-  asyncHandler(async (req, res) => {
-    const { treatmentId } = req.params;
-    const { record_date } = req.body;
-
-    if (!req.files || !req.files.length) {
-      return res.status(400).json({ error: 'Debes enviar al menos un archivo.' });
-    }
-
-    const urls = await Promise.all(req.files.map(uploadFileToS3));
-
-    for (const url of urls) {
-      await pool.query(
-        `INSERT INTO treatment_evidences
-           (patient_service_id, record_date, file_url, created_at, updated_at)
-         VALUES (?, ?, ?, NOW(), NOW())`,
-        [treatmentId, record_date || new Date(), url]
-      );
-    }
-
-    res.status(201).json({ message: 'Evidencias subidas correctamente.', urls });
-  })
-);
-
-// 6) DELETE: eliminar una evidencia
-router.delete(
-  '/:patientId/tratamientos/:treatmentId/evidencias/:id',
-  asyncHandler(async (req, res) => {
-    const { id } = req.params;
-    const [result] = await pool.query(
-      `DELETE FROM treatment_evidences WHERE id = ?`,
-      [id]
-    );
-    if (result.affectedRows === 0) {
-      return res.status(404).json({ error: 'Evidencia no encontrada.' });
-    }
-    res.json({ message: 'Evidencia eliminada.' });
-  })
-);
+// DELETE /api/pacientes/:patientId/tratamientos/:treatmentId/evidencias/:id
+router.delete('/:id', asyncHandler(async (req, res) => {
+  const { id } = req.params;
+  const [result] = await pool.query(
+    `DELETE FROM treatment_evidences WHERE id = ?`,
+    [id]
+  );
+  if (result.affectedRows === 0) {
+    return res.status(404).json({ error: 'Evidencia no encontrada.' });
+  }
+  res.json({ message: 'Evidencia eliminada.' });
+}));
 
 module.exports = router;
