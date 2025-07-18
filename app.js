@@ -64,6 +64,7 @@ app.use(
   authenticateJwt,
   citasRoutes
 );
+
 app.use(
   '/api/pacientes/:patientId/tratamientos',
   authenticateJwt,

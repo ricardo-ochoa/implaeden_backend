@@ -24,8 +24,10 @@ router.get(
         pp.monto,
         IFNULL(pagg.total_pagado, 0) AS total_pagado,
         (sv.total_cost - IFNULL(pagg.total_pagado, 0)) AS saldo_pendiente,
-        pm.name              AS metodo_pago,
-        ps.name              AS estado,
+        pm.id               AS payment_method_id,
+        pm.name             AS metodo_pago,
+        ps.id               AS payment_status_id,
+        ps.name             AS estado,
         pp.numero_factura,
         pp.notas,
         pp.created_at,
@@ -63,17 +65,42 @@ router.get(
 router.post(
   '/',
   asyncHandler(async (req, res) => {
-    const { patientId } = req.params;
+    const { patientId } = req.params
     const {
       fecha,
       patient_service_id,
       monto,
       payment_method_id,
-      payment_status_id,
-      notas
-    } = req.body;
+      payment_status_id: rawStatusId,
+      notas,
+    } = req.body
 
-    const invoiceNumber = `F-${Date.now()}`;
+    // 1) Si no envían payment_status_id, buscamos el id de "finalizado"
+    let payment_status_id = rawStatusId
+    if (!payment_status_id) {
+      const [statusRows] = await db.query(
+        'SELECT id FROM payment_statuses WHERE name = ? LIMIT 1',
+        ['finalizado']
+      )
+      payment_status_id = statusRows.length
+        ? statusRows[0].id
+        : 1 // fallback si no existe el registro, usas 1 como genérico
+    }
+
+    // 2) (Opcional) default para payment_method_id
+    let pmId = payment_method_id
+    if (!pmId) {
+      const [methodRows] = await db.query(
+        'SELECT id FROM payment_methods WHERE name = ? LIMIT 1',
+        ['efectivo']
+      )
+      pmId = methodRows.length
+        ? methodRows[0].id
+        : null
+    }
+
+    const invoiceNumber = `F-${Date.now()}`
+
     const insertSql = `
       INSERT INTO patient_payments (
         patient_id,
@@ -87,52 +114,52 @@ router.post(
         created_at,
         updated_at
       ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, NOW(), NOW())
-    `;
+    `
+
     const [ins] = await db.query(insertSql, [
       patientId,
       patient_service_id,
       fecha,
       parseFloat(monto),
-      payment_method_id,
+      pmId,
       payment_status_id,
       invoiceNumber,
-      notas
-    ]);
+      notas || null,
+    ])
 
-    // Devolver el registro creado, con joins
+    // Devuelve el registro recién creado con sus joins…
     const [rows] = await db.query(
-      `
-      SELECT
-        pp.id,
-        pp.fecha,
-        pp.patient_service_id,
-        s.name                AS tratamiento,
-        sv.total_cost,
-        IFNULL(pagg.total_pagado, 0) AS total_pagado,
-        (sv.total_cost - IFNULL(pagg.total_pagado, 0)) AS saldo_pendiente,
-        pm.name               AS metodo_pago,
-        ps.name               AS estado,
-        pp.numero_factura,
-        pp.notas
-      FROM patient_payments pp
-      LEFT JOIN patient_services sv ON sv.id = pp.patient_service_id
-      LEFT JOIN services s          ON s.id  = sv.service_id
-      LEFT JOIN (
-        SELECT patient_service_id, SUM(monto) AS total_pagado
-        FROM patient_payments
-        WHERE patient_service_id IS NOT NULL
-        GROUP BY patient_service_id
-      ) AS pagg ON pagg.patient_service_id = pp.patient_service_id
-      LEFT JOIN payment_methods pm  ON pm.id = pp.payment_method_id
-      LEFT JOIN payment_statuses ps ON ps.id = pp.payment_status_id
-      WHERE pp.id = ?
-      `,
+      `SELECT
+         pp.id,
+         pp.fecha,
+         pp.patient_service_id,
+         s.name                AS tratamiento,
+         sv.total_cost,
+         IFNULL(pagg.total_pagado, 0)       AS total_pagado,
+         (sv.total_cost - IFNULL(pagg.total_pagado, 0)) AS saldo_pendiente,
+         pm.name               AS metodo_pago,
+         ps.name               AS estado,
+         pp.numero_factura,
+         pp.notas
+       FROM patient_payments pp
+       LEFT JOIN patient_services sv  ON sv.id = pp.patient_service_id
+       LEFT JOIN services s           ON s.id  = sv.service_id
+       LEFT JOIN (
+         SELECT patient_service_id, SUM(monto) AS total_pagado
+         FROM patient_payments
+         WHERE patient_service_id IS NOT NULL
+         GROUP BY patient_service_id
+       ) AS pagg ON pagg.patient_service_id = pp.patient_service_id
+       LEFT JOIN payment_methods pm ON pm.id = pp.payment_method_id
+        LEFT JOIN payment_statuses ps ON ps.id = pp.payment_status_id
+       WHERE pp.id = ?`,
       [ins.insertId]
-    );
+    )
 
-    res.status(201).json(rows[0]);
+    res.status(201).json(rows[0])
   })
-);
+)
+
 
 // ————————————————————————————————
 // 3) Actualizar pago
