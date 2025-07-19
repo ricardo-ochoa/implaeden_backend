@@ -3,6 +3,7 @@ const express   = require('express');
 const cors      = require('cors');
 const passport  = require('passport');
 const path      = require('path');
+const cookieParser = require('cookie-parser');
 
 // 1) Carga dinámicamente .env.development o .env.production
 const env = process.env.NODE_ENV || 'development';
@@ -26,10 +27,12 @@ const { authenticateJwt }      = require('./middleware/auth');
 
 // 3) Iniciar Express
 const app = express();
+app.set('trust proxy', 1);
 
 // 4) Middlewares genéricos
 app.use(express.json());
 app.use(express.urlencoded({ extended: true }));
+app.use(cookieParser());
 
 // 5) Configuración CORS desde env
 const corsOrigins = (process.env.CORS_ORIGINS || '')
