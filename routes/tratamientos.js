@@ -31,4 +31,25 @@ router.get(
   })
 );
 
+router.delete(
+  '/:treatmentId',
+  asyncHandler(async (req, res) => {
+    const { treatmentId } = req.params;
+
+    // Lógica para borrar dependencias como pagos (si aplica)
+    // await db.query('DELETE FROM patient_payments WHERE treatment_id = ?', [treatmentId]);
+
+    const [result] = await db.query(
+      'DELETE FROM patient_services WHERE id = ?',
+      [treatmentId]
+    );
+
+    if (result.affectedRows === 0) {
+      return res.status(404).json({ error: 'Tratamiento no encontrado en la base de datos.' });
+    }
+
+    res.status(200).json({ message: 'Tratamiento eliminado exitosamente.' });
+  })
+);
+
 module.exports = router;

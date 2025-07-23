@@ -20,10 +20,10 @@ const servicioRoutes           = require('./routes/servicios');
 const paymentsRoutes           = require('./routes/payments');
 const emailRoutes              = require('./routes/email');
 const citasRoutes              = require('./routes/citas');
-const tratamientosRoutes       = require('./routes/tratamientos');
 const uploadRoutes             = require('./routes/uploads');
 const testRoutes               = require('./routes/test');
 const { authenticateJwt }      = require('./middleware/auth');
+const tratamientosRoutes = require('./routes/tratamientos');
 
 // 3) Iniciar Express
 const app = express();
@@ -77,15 +77,12 @@ app.use(
   citasRoutes
 );
 app.use(
-  '/api/pacientes/:patientId/tratamientos',
-  authenticateJwt,
-  tratamientosRoutes
-);
-app.use(
   '/api/pacientes/:patientId/tratamientos/:treatmentId/evidencias',
   authenticateJwt,
   treatmentEvidencesRoutes
 );
+
+app.use('/api/pacientes/:patientId/tratamientos', authenticateJwt, tratamientosRoutes);
 
 // 10) CRUD principal y otros recursos protegidos
 app.use('/api/pacientes',          authenticateJwt, pacienteRoutes);
