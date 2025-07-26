@@ -31,13 +31,33 @@ router.get(
   })
 );
 
+    router.patch(
+      '/:treatmentId',
+      asyncHandler(async (req, res) => {
+        const { treatmentId } = req.params;
+        const { total_cost } = req.body;
+
+        // Validación simple
+        if (total_cost === undefined || isNaN(parseFloat(total_cost))) {
+          return res.status(400).json({ error: 'El costo proporcionado no es un número válido.' });
+        }
+
+        const query = 'UPDATE patient_services SET total_cost = ? WHERE id = ?';
+        const [result] = await db.query(query, [total_cost, treatmentId]);
+
+        if (result.affectedRows === 0) {
+          return res.status(404).json({ error: 'Tratamiento no encontrado.' });
+        }
+
+        res.status(200).json({ message: 'Costo del tratamiento actualizado exitosamente.' });
+      })
+    );
+
+
 router.delete(
   '/:treatmentId',
   asyncHandler(async (req, res) => {
     const { treatmentId } = req.params;
-
-    // Lógica para borrar dependencias como pagos (si aplica)
-    // await db.query('DELETE FROM patient_payments WHERE treatment_id = ?', [treatmentId]);
 
     const [result] = await db.query(
       'DELETE FROM patient_services WHERE id = ?',
