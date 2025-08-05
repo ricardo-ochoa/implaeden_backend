@@ -11,7 +11,7 @@ require('dotenv').config({
   path: path.resolve(process.cwd(), `.env.${env}`)
 });
 
-// 2) Importar routers y middleware
+// 2) Importar routers y middlewarea
 const authRoutes               = require('./routes/auth');
 const treatmentEvidencesRoutes = require('./routes/treatmentEvidences');
 const pacienteRoutes           = require('./routes/pacientes');
@@ -35,17 +35,34 @@ app.use(express.urlencoded({ extended: true }));
 app.use(cookieParser());
 
 // 5) Configuración CORS desde env
-const corsOrigins = (process.env.CORS_ORIGINS || '')
+const staticOrigins = (process.env.CORS_ORIGINS || '')
   .split(',')
   .map(origin => origin.trim())
   .filter(Boolean);
 
+// Segundo, definimos el patrón dinámico para todas las URLs de Vercel
+const vercelPattern = /^https:\/\/implaeden(-[a-z0-9-]+)?\.vercel\.app$/;
+
 const corsOptions = {
-  origin:       corsOrigins,
-  methods:      ['GET', 'POST', 'PUT', 'DELETE', 'PATCH', 'OPTIONS'],
+  origin: (origin, callback) => {
+    // Permitimos peticiones sin 'origin' (ej. Postman, apps móviles, etc.)
+    // ¡Importante para pruebas locales!
+    if (!origin) return callback(null, true);
+
+    // Verificamos si el origen está en nuestra lista blanca estática O si coincide con el patrón de Vercel
+    if (staticOrigins.includes(origin) || vercelPattern.test(origin)) {
+      callback(null, true);
+    } else {
+      callback(new Error('No permitido por la política de CORS'));
+    }
+  },
+  methods: ['GET', 'POST', 'PUT', 'DELETE', 'PATCH', 'OPTIONS'],
   allowedHeaders: ['Content-Type', 'Authorization'],
-  credentials:  true,
+  credentials: true,
 };
+
+app.use(cors(corsOptions));
+app.options('*', cors(corsOptions));
 
 app.use(cors(corsOptions));
 app.options('*', cors(corsOptions));
