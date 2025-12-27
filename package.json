@@ -12,6 +12,7 @@
   "license": "ISC",
   "description": "",
   "dependencies": {
+    "@aws-sdk/client-polly": "^3.958.0",
     "@aws-sdk/client-rds": "^3.726.1",
     "@aws-sdk/client-s3": "^3.726.1",
     "aws-sdk": "^2.1692.0",
@@ -32,6 +33,7 @@
     "passport-local": "^1.0.0"
   },
   "devDependencies": {
+    "cross-env": "^10.1.0",
     "nodemon": "^3.1.9"
   }
 }

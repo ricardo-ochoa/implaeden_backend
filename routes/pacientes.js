@@ -1,8 +1,24 @@
 const express = require('express');
 const router = express.Router();
 const db = require('../config/db');
+const pool = require('../config/db');
 const AWS = require('aws-sdk');
 const multer = require('multer');
+const { getPatientSummary } = require("../services/patientSummaryService");
+
+router.get("/:patientId/summary", async (req, res) => {
+  try {
+    const patientId = Number(req.params.patientId);
+    if (!patientId) return res.status(400).json({ error: "patientId inválido" });
+
+    const summary = await getPatientSummary(patientId);
+    return res.json(summary);
+  } catch (err) {
+    console.error("Error en /api/pacientes/:patientId/summary:", err);
+    return res.status(500).json({ error: "Error interno generando resumen de paciente" });
+  }
+});
+
 
 // Middleware para manejar errores
 const asyncHandler = (fn) => (req, res, next) => {
@@ -47,7 +63,7 @@ const uploadFileToS3 = async (file) => {
 router.get(
   '/',
   asyncHandler(async (req, res) => {
-    const { search = '', page = 1, limit = 10 } = req.query; // Definir valores por defecto para la búsqueda y paginación
+    const { search = '', page = 1, limit = 20 } = req.query; // Definir valores por defecto para la búsqueda y paginación
     const offset = (page - 1) * limit;
 
     const query = `
@@ -200,6 +216,135 @@ router.get(
   })
 );
 
+router.get('/:patientId/summary', async (req, res) => {
+  const patientId = Number(req.params.patientId);
+
+  if (!patientId) {
+    return res.status(400).json({ error: 'patientId inválido' });
+  }
+
+  try {
+    const conn = await pool.getConnection();
+
+    try {
+      // 1) Info básica del paciente
+      const [patientRows] = await conn.query(
+        `
+        SELECT 
+          id, nombre, apellidos, telefono, email, fecha_nacimiento
+        FROM pacientes
+        WHERE id = ?
+        `,
+        [patientId]
+      );
+      const patient = patientRows[0] || null;
+
+      // 2) Último servicio realizado
+      const [serviceRows] = await conn.query(
+        `
+        SELECT 
+          ps.id,
+          ps.service_date,
+          ps.notes,
+          ps.status,
+          ps.total_cost,
+          s.name      AS service_name,
+          s.category  AS service_category
+        FROM patient_services AS ps
+        JOIN services AS s ON s.id = ps.service_id
+        WHERE ps.patient_id = ?
+        ORDER BY ps.service_date DESC
+        LIMIT 1
+        `,
+        [patientId]
+      );
+      const lastService = serviceRows[0] || null;
+
+      // 3) Próxima cita (hoy en adelante)
+      const [appointmentRows] = await conn.query(
+        `
+        SELECT 
+          c.id,
+          c.appointment_at,
+          c.observaciones,
+          s.name AS service_name
+        FROM citas AS c
+        JOIN services AS s ON s.id = c.service_id
+        WHERE c.patient_id = ?
+          AND c.appointment_at >= NOW()
+        ORDER BY c.appointment_at ASC
+        LIMIT 1
+        `,
+        [patientId]
+      );
+      const nextAppointment = appointmentRows[0] || null;
+
+      // 4) Último pago
+      const [paymentRows] = await conn.query(
+        `
+        SELECT 
+          pp.id,
+          pp.fecha,
+          pp.tratamiento,
+          pp.monto,
+          pm.name AS payment_method,
+          ps2.name AS payment_status
+        FROM patient_payments AS pp
+        LEFT JOIN payment_methods   AS pm  ON pm.id  = pp.payment_method_id
+        LEFT JOIN payment_statuses  AS ps2 ON ps2.id = pp.payment_status_id
+        WHERE pp.patient_id = ?
+        ORDER BY pp.fecha DESC
+        LIMIT 1
+        `,
+        [patientId]
+      );
+      const lastPayment = paymentRows[0] || null;
+
+      conn.release();
+
+      return res.json({
+        patient,
+        lastService,
+        nextAppointment,
+        lastPayment,
+      });
+    } catch (err) {
+      conn.release();
+      console.error('Error en /api/pacientes/:patientId/summary:', err);
+      return res
+        .status(500)
+        .json({ error: 'Error interno generando resumen de paciente' });
+    }
+  } catch (err) {
+    console.error('Error de conexión a la BD:', err);
+    return res
+      .status(500)
+      .json({ error: 'No se pudo conectar a la base de datos' });
+  }
+});
+
+// Obtener pacientes recientes por created_at (ej. últimos N días)
+router.get(
+  '/recent',
+  asyncHandler(async (req, res) => {
+    const days = Number(req.query.days || 30);
+
+    const query = `
+      SELECT *
+      FROM pacientes
+      WHERE created_at >= DATE_SUB(NOW(), INTERVAL ? DAY)
+      ORDER BY created_at DESC
+    `;
+
+    const [rows] = await db.query(query, [days]);
+
+    res.json({
+      days,
+      total: rows.length,
+      patients: rows,
+    });
+  })
+);
 
 
 module.exports = router;
