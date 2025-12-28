@@ -17,7 +17,7 @@ router.get("/:patientId/summary", async (req, res) => {
     console.error("Error en /api/pacientes/:patientId/summary:", err);
     return res.status(500).json({ error: "Error interno generando resumen de paciente" });
   }
-});
+})
 
 
 // Middleware para manejar errores

@@ -34,7 +34,7 @@ function formatDateTime(dateString) {
 }
 
 function summaryToSsml(summary) {
-  const { patient, lastService, nextAppointment, lastPayment } = summary || {};
+  const { patient, lastService, lastAppointment, lastPayment } = summary || {}
   const fullName = patient ? `${patient.nombre || ""} ${patient.apellidos || ""}`.trim() : "Paciente";
 
   const lines = [];
@@ -56,14 +56,18 @@ function summaryToSsml(summary) {
     lines.push("Último servicio: no hay servicios registrados.");
   }
 
-  if (nextAppointment) {
-    const fecha = nextAppointment.appointment_at ? formatDateTime(nextAppointment.appointment_at) : "Sin fecha";
-    const parts = [fecha];
-    if (nextAppointment.service_name) parts.push(`para ${nextAppointment.service_name}`);
-    lines.push(`Próxima cita: ${parts.join(", ")}.`);
-  } else {
-    lines.push("Próxima cita: no hay una cita programada.");
-  }
+  if (lastAppointment) {
+  const fecha = lastAppointment.appointment_at
+    ? formatDateTime(lastAppointment.appointment_at)
+    : "Sin fecha";
+
+  const parts = [fecha];
+  if (lastAppointment.service_name) parts.push(`para ${lastAppointment.service_name}`);
+
+  lines.push(`Última cita registrada: ${parts.join(", ")}.`);
+} else {
+  lines.push("Última cita registrada: no hay citas registradas.");
+}
 
   if (lastPayment) {
   const fecha = lastPayment.fecha ? formatDate(lastPayment.fecha) : "Sin fecha";

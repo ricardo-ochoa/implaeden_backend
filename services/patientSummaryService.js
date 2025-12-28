@@ -39,24 +39,25 @@ async function getPatientSummary(patientId) {
     );
     const lastService = serviceRows[0] || null;
 
-    // 3) Próxima cita
-    const [appointmentRows] = await conn.query(
-      `
-      SELECT 
-        c.id,
-        c.appointment_at,
-        c.observaciones,
-        s.name AS service_name
-      FROM citas AS c
-      JOIN services AS s ON s.id = c.service_id
-      WHERE c.patient_id = ?
-        AND c.appointment_at >= NOW()
-      ORDER BY c.appointment_at ASC
-      LIMIT 1
-      `,
-      [pid]
-    );
-    const nextAppointment = appointmentRows[0] || null;
+ // 3) Última cita registrada (en el pasado)
+const [appointmentRows] = await conn.query(
+  `
+  SELECT 
+    c.id,
+    c.appointment_at,
+    c.observaciones,
+    s.name AS service_name
+  FROM citas AS c
+  JOIN services AS s ON s.id = c.service_id
+  WHERE c.patient_id = ?
+    AND c.appointment_at <= NOW()
+  ORDER BY c.appointment_at DESC
+  LIMIT 1
+  `,
+  [pid]
+);
+
+const lastAppointment = appointmentRows[0] || null;
 
     // 4) Último pago
     const [paymentRows] = await conn.query(
@@ -79,7 +80,7 @@ async function getPatientSummary(patientId) {
     );
     const lastPayment = paymentRows[0] || null;
 
-    return { patient, lastService, nextAppointment, lastPayment };
+    return { patient, lastService, lastAppointment, lastPayment };
   } finally {
     conn.release();
   }
