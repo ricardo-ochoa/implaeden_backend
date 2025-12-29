@@ -5,13 +5,12 @@ const passport = require("passport");
 const path = require("path");
 const cookieParser = require("cookie-parser");
 
-// 1) Carga dinámicamente .env.development o .env.production
 const env = process.env.NODE_ENV || "development";
 require("dotenv").config({
-  path: path.resolve(process.cwd(), `.env.${env}`),
+  path: path.resolve(__dirname, `.env.${env}`),
 });
 
-// 2) Importar routers y middleware
+// Routers
 const authRoutes = require("./routes/auth");
 const treatmentEvidencesRoutes = require("./routes/treatmentEvidences");
 const pacienteRoutes = require("./routes/pacientes");
@@ -22,38 +21,39 @@ const emailRoutes = require("./routes/email");
 const citasRoutes = require("./routes/citas");
 const uploadRoutes = require("./routes/uploads");
 const testRoutes = require("./routes/test");
-const { authenticateJwt } = require("./middleware/auth");
 const tratamientosRoutes = require("./routes/tratamientos");
 const patientSummaryTtsRoutes = require("./routes/patientSummaryTts");
+const aiRoutes = require("./routes/ai"); // ✅ FALTABA
 
-// 3) Iniciar Express
+const { authenticateJwt } = require("./middleware/auth");
+
 const app = express();
 app.set("trust proxy", 1);
 
-// 4) Middlewares genéricos
 app.use(express.json());
 app.use(express.urlencoded({ extended: true }));
 app.use(cookieParser());
 
-// 5) Configuración CORS desde env
+// ✅ (si usas cookie token) convertir cookie->Authorization ANTES de authenticateJwt
+app.use((req, _res, next) => {
+  if (!req.headers.authorization && req.cookies?.token) {
+    req.headers.authorization = `Bearer ${req.cookies.token}`;
+  }
+  next();
+});
+
+// CORS antes de rutas
 const staticOrigins = (process.env.CORS_ORIGINS || "")
   .split(",")
   .map((origin) => origin.trim())
   .filter(Boolean);
 
-// Patrón dinámico para todas las URLs de Vercel
 const vercelPattern = /^https:\/\/implaeden(-[a-z0-9-]+)?\.vercel\.app$/;
 
 const corsOptions = {
   origin: (origin, callback) => {
-    // Permitimos peticiones sin 'origin' (ej. Postman, apps móviles, etc.)
     if (!origin) return callback(null, true);
-
-    // Origen permitido si está en whitelist o coincide con patrón de Vercel
-    if (staticOrigins.includes(origin) || vercelPattern.test(origin)) {
-      return callback(null, true);
-    }
-
+    if (staticOrigins.includes(origin) || vercelPattern.test(origin)) return callback(null, true);
     return callback(new Error("No permitido por la política de CORS"));
   },
   methods: ["GET", "POST", "PUT", "DELETE", "PATCH", "OPTIONS"],
@@ -64,22 +64,25 @@ const corsOptions = {
 app.use(cors(corsOptions));
 app.options("*", cors(corsOptions));
 
-// 6) Passport JWT
+// Passport
 require("./auth/passport");
 app.use(passport.initialize());
 
-// 7) Logging básico de cada request
+// Logging
 app.use((req, res, next) => {
   console.log(`→ [${env}] ${req.method} ${req.originalUrl}`);
   next();
 });
 
-// 8) Rutas públicas
+// Public
 app.use("/api/auth", authRoutes);
 app.use("/api/test", testRoutes);
 app.use("/api/uploads", uploadRoutes);
 
-// 9) Rutas anidadas protegidas por JWT
+// ✅ AI protegido (ya con CORS y cookie->auth listo)
+app.use("/api/ai", authenticateJwt, aiRoutes);
+
+// Protected nested
 app.use("/api/pacientes/:patientId/pagos", authenticateJwt, paymentsRoutes);
 app.use("/api/pacientes/:patientId/citas", authenticateJwt, citasRoutes);
 app.use(
@@ -87,22 +90,16 @@ app.use(
   authenticateJwt,
   treatmentEvidencesRoutes
 );
-
-app.use(
-  "/api/pacientes/:patientId/tratamientos",
-  authenticateJwt,
-  tratamientosRoutes
-);
-
+app.use("/api/pacientes/:patientId/tratamientos", authenticateJwt, tratamientosRoutes);
 app.use("/api/pacientes/:patientId", authenticateJwt, patientSummaryTtsRoutes);
 
-// 10) CRUD principal y otros recursos protegidos
+// Protected main
 app.use("/api/pacientes", authenticateJwt, pacienteRoutes);
 app.use("/api/clinical-histories", authenticateJwt, clinicalHistoryRoutes);
 app.use("/api/servicios", authenticateJwt, servicioRoutes);
 app.use("/api/email", authenticateJwt, emailRoutes);
 
-// 11) Manejador de errores global (al final)
+// Error handler
 app.use((err, req, res, next) => {
   console.error(err.stack);
   res.status(err.status || 500).json({
@@ -111,7 +108,6 @@ app.use((err, req, res, next) => {
   });
 });
 
-// 12) Arranque del servidor
 const PORT = process.env.PORT || 4000;
 app.listen(PORT, () => {
   console.log(`Servidor corriendo en ${env} en puerto ${PORT}`);
