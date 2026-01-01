@@ -5,27 +5,48 @@ const bcrypt = require('bcrypt');
 const jwt = require('jsonwebtoken');
 const db = require('../config/db');
 const router = express.Router();
+const crypto = require("crypto");
+const { authenticateJwt, authorizePermissions } = require("../middleware/auth");
 
 // Registro de usuario
-router.post('/register', async (req, res) => {
-  const { email, password, role } = req.body;
-  try {
-    const hash = await bcrypt.hash(password, 10);
-    let permission = 
-      role === 'admin' ? 'all' :
-      (role === 'medico' || role === 'secretario') ? 'editor' :
-      'reader';
-    await db.query(
-      `INSERT INTO users (email, password_hash, role, permission)
-       VALUES (?, ?, ?, ?)`,
-      [email, hash, role, permission]
-    );
-    res.status(201).send({ message: 'Usuario creado con rol ' + role });
-  } catch (err) {
-    console.error('Error en registro:', err);
-    res.status(500).send({ message: 'Error interno al registrar usuario' });
+router.post(
+  "/register",
+  authenticateJwt,
+  authorizePermissions("all"),
+  async (req, res) => {
+    const { email, password, role } = req.body;
+    const allowedRoles = new Set(["medico", "secretario", "reader"]);
+    if (!allowedRoles.has(role)) {
+      return res.status(400).send({ message: "Rol inválido" });
+    }
+
+    if (!email || !password) {
+      return res.status(400).send({ message: "Email y password requeridos" });
+    }
+
+    const permission =
+      role === "medico" || role === "secretario" ? "editor" : "reader";
+
+    try {
+      // evitar duplicados
+      const [exists] = await db.query("SELECT id FROM users WHERE email = ?", [email]);
+      if (exists.length) return res.status(409).send({ message: "Email ya existe" });
+
+      const hash = await bcrypt.hash(password, 10);
+
+      await db.query(
+        `INSERT INTO users (email, password_hash, role, permission)
+         VALUES (?, ?, ?, ?)`,
+        [email, hash, role, permission]
+      );
+
+      res.status(201).send({ message: `Usuario creado con rol ${role}` });
+    } catch (err) {
+      console.error("Error en registro:", err);
+      res.status(500).send({ message: "Error interno al registrar usuario" });
+    }
   }
-});
+);
 
 // Login de usuario: emite access + refresh tokens
 // routes/auth.js → LOGIN
@@ -110,9 +131,125 @@ router.post('/logout', async (req, res) => {
   if (refreshToken) {
     await db.query('DELETE FROM refresh_tokens WHERE token = ?', [refreshToken]);
   }
-  res
-    .clearCookie('refreshToken', { path: '/' })
-    .sendStatus(204);
+  return res.clearCookie('refreshToken', { path: '/' }).sendStatus(204);
 });
+
+
+router.post(
+  "/invite",
+  authenticateJwt,
+  authorizePermissions("all"),
+  async (req, res) => {
+    const { email, role } = req.body;
+
+    const allowedRoles = new Set(["medico", "secretario", "reader"]);
+    if (!email || !allowedRoles.has(role)) {
+      return res.status(400).send({ message: "Email o rol inválido" });
+    }
+
+    const permission =
+      role === "medico" || role === "secretario" ? "editor" : "reader";
+
+    const token = crypto.randomBytes(32).toString("hex");
+    const tokenHash = crypto.createHash("sha256").update(token).digest("hex");
+    const expiresAt = new Date(Date.now() + 48 * 60 * 60 * 1000);
+
+    try {
+      await db.query(
+  `DELETE FROM user_invitations
+   WHERE email = ? AND used_at IS NULL AND expires_at > NOW()`,
+  [email]
+);
+      const [exists] = await db.query("SELECT id FROM users WHERE email = ?", [email]);
+      if (exists.length) return res.status(409).send({ message: "Ese email ya existe" });
+
+      // (recomendado) evitar invitar si ya hay una invitación activa
+      const [pending] = await db.query(
+        `SELECT id FROM user_invitations
+         WHERE email = ? AND used_at IS NULL AND expires_at > NOW()
+         LIMIT 1`,
+        [email]
+      );
+      if (pending.length) {
+        return res.status(409).send({ message: "Ya hay una invitación activa para ese email" });
+      }
+
+      await db.query(
+        `INSERT INTO user_invitations (email, role, permission, token_hash, expires_at, created_by)
+         VALUES (?, ?, ?, ?, ?, ?)`,
+        [email, role, permission, tokenHash, expiresAt, req.user.sub]
+      );
+
+      const inviteUrl = `${process.env.APP_URL}/accept-invite?token=${token}`;
+
+      return res.status(201).send({
+        message: "Invitación creada. Comparte este link con el usuario.",
+        inviteUrl,
+        expiresAt,
+      });
+    } catch (err) {
+      console.error("Error invitando:", err);
+      return res.status(500).send({ message: "Error interno al invitar" });
+    }
+  }
+);
+
+
+router.post("/invite/accept", async (req, res) => {
+  const { token, password } = req.body;
+  if (!token || !password) return res.status(400).send({ message: "token y password requeridos" });
+
+  const tokenHash = crypto.createHash("sha256").update(token).digest("hex");
+  const conn = await db.getConnection();
+
+  try {
+    await conn.beginTransaction();
+
+    const [rows] = await conn.query(
+      `SELECT * FROM user_invitations
+       WHERE token_hash = ? AND used_at IS NULL
+       LIMIT 1 FOR UPDATE`,
+      [tokenHash]
+    );
+
+    if (!rows.length) {
+      await conn.rollback();
+      return res.status(400).send({ message: "Invitación inválida" });
+    }
+
+    const inv = rows[0];
+    if (new Date(inv.expires_at) < new Date()) {
+      await conn.rollback();
+      return res.status(400).send({ message: "Invitación expirada" });
+    }
+
+    const [exists] = await conn.query("SELECT id FROM users WHERE email = ?", [inv.email]);
+    if (exists.length) {
+      await conn.rollback();
+      return res.status(409).send({ message: "Ese email ya existe" });
+    }
+
+    const hash = await bcrypt.hash(password, 10);
+
+    await conn.query(
+      `INSERT INTO users (email, password_hash, role, permission)
+       VALUES (?, ?, ?, ?)`,
+      [inv.email, hash, inv.role, inv.permission]
+    );
+
+    await conn.query("UPDATE user_invitations SET used_at = NOW() WHERE id = ?", [inv.id]);
+
+    await conn.commit();
+    return res.status(201).send({ message: "Cuenta creada. Ya puedes iniciar sesión." });
+  } catch (err) {
+    await conn.rollback();
+    console.error("Error aceptando invitación:", err);
+    return res.status(500).send({ message: "Error interno" });
+  } finally {
+    conn.release();
+  }
+});
+
+
 
 module.exports = router;
