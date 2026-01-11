@@ -190,31 +190,27 @@ router.delete(
 router.get(
   '/:id/tratamientos',
   asyncHandler(async (req, res) => {
-    const { id } = req.params;
-
+    const { id } = req.params
     const query = `
       SELECT 
         ps.id AS treatment_id, 
         ps.service_date, 
         ps.status,
-        ps.total_cost     AS total_cost,   
-        s.name AS service_name, 
-        s.category AS service_category
+        ps.total_cost AS total_cost,
+        s.name AS service_name,
+        sc.name AS service_category,
+        sc.id   AS service_category_id
       FROM patient_services ps
-      INNER JOIN services s ON ps.service_id = s.id
+      JOIN services s ON ps.service_id = s.id
+      JOIN service_categories sc ON sc.id = s.category_id
       WHERE ps.patient_id = ?
       ORDER BY ps.service_date DESC
-    `;
-
-    try {
-      const [rows] = await db.query(query, [id]);
-      res.json(rows);
-    } catch (err) {
-      console.error('Error al obtener tratamientos:', err);
-      res.status(500).json({ error: 'Error al obtener tratamientos del paciente.' });
-    }
+    `
+    const [rows] = await db.query(query, [id])
+    res.json(rows)
   })
-);
+)
+
 
 router.get('/:patientId/summary', async (req, res) => {
   const patientId = Number(req.params.patientId);
@@ -242,19 +238,21 @@ router.get('/:patientId/summary', async (req, res) => {
       // 2) Último servicio realizado
       const [serviceRows] = await conn.query(
         `
-        SELECT 
-          ps.id,
-          ps.service_date,
-          ps.notes,
-          ps.status,
-          ps.total_cost,
-          s.name      AS service_name,
-          s.category  AS service_category
-        FROM patient_services AS ps
-        JOIN services AS s ON s.id = ps.service_id
-        WHERE ps.patient_id = ?
-        ORDER BY ps.service_date DESC
-        LIMIT 1
+       SELECT 
+            ps.id,
+            ps.service_date,
+            ps.notes,
+            ps.status,
+            ps.total_cost,
+            s.name AS service_name,
+            c.name AS service_category,
+            c.id   AS service_category_id
+          FROM patient_services ps
+          JOIN services s ON s.id = ps.service_id
+          JOIN service_categories c ON c.id = s.category_id
+          WHERE ps.patient_id = ?
+          ORDER BY ps.service_date DESC
+          LIMIT 1
         `,
         [patientId]
       );
@@ -267,9 +265,12 @@ router.get('/:patientId/summary', async (req, res) => {
           c.id,
           c.appointment_at,
           c.observaciones,
-          s.name AS service_name
-        FROM citas AS c
-        JOIN services AS s ON s.id = c.service_id
+          s.name AS service_name,
+          sc.name AS service_category,
+          sc.id   AS service_category_id
+        FROM citas c
+        JOIN services s ON s.id = c.service_id
+        JOIN service_categories sc ON sc.id = s.category_id
         WHERE c.patient_id = ?
           AND c.appointment_at >= NOW()
         ORDER BY c.appointment_at ASC

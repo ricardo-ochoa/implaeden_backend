@@ -155,25 +155,21 @@ router.post(
     const expiresAt = new Date(Date.now() + 48 * 60 * 60 * 1000);
 
     try {
-      await db.query(
-  `DELETE FROM user_invitations
-   WHERE email = ? AND used_at IS NULL AND expires_at > NOW()`,
-  [email]
-);
-      const [exists] = await db.query("SELECT id FROM users WHERE email = ?", [email]);
-      if (exists.length) return res.status(409).send({ message: "Ese email ya existe" });
-
-      // (recomendado) evitar invitar si ya hay una invitación activa
-      const [pending] = await db.query(
-        `SELECT id FROM user_invitations
-         WHERE email = ? AND used_at IS NULL AND expires_at > NOW()
-         LIMIT 1`,
+      // 1) si ya existe usuario, no invitamos
+      const [exists] = await db.query(
+        "SELECT id FROM users WHERE email = ? LIMIT 1",
         [email]
       );
-      if (pending.length) {
-        return res.status(409).send({ message: "Ya hay una invitación activa para ese email" });
-      }
+      if (exists.length) return res.status(409).send({ message: "Ese email ya existe" });
 
+      // 2) rotación: borra invitaciones activas anteriores
+      await db.query(
+        `DELETE FROM user_invitations
+         WHERE email = ? AND used_at IS NULL AND expires_at > NOW()`,
+        [email]
+      );
+
+      // 3) crea nueva invitación
       await db.query(
         `INSERT INTO user_invitations (email, role, permission, token_hash, expires_at, created_by)
          VALUES (?, ?, ?, ?, ?, ?)`,
@@ -193,7 +189,6 @@ router.post(
     }
   }
 );
-
 
 router.post("/invite/accept", async (req, res) => {
   const { token, password } = req.body;
@@ -250,6 +245,111 @@ router.post("/invite/accept", async (req, res) => {
   }
 });
 
+// routes/auth.js (agrega cerca de invite)
+router.post(
+  "/password/reset/create",
+  authenticateJwt,
+  authorizePermissions("all"),
+  async (req, res) => {
+    const { email } = req.body;
+    if (!email) return res.status(400).send({ message: "Email requerido" });
+
+    try {
+      // 1) valida que exista el usuario
+      const [users] = await db.query("SELECT id FROM users WHERE email = ? LIMIT 1", [email]);
+      if (!users.length) return res.status(404).send({ message: "Usuario no encontrado" });
+
+      const userId = users[0].id;
+
+      // 2) rota resets activos previos (evita duplicados)
+      await db.query(
+        `DELETE FROM password_resets
+         WHERE email = ? AND used_at IS NULL AND expires_at > NOW()`,
+        [email]
+      );
+
+      // 3) crea token
+      const token = crypto.randomBytes(32).toString("hex");
+      const tokenHash = crypto.createHash("sha256").update(token).digest("hex");
+      const expiresAt = new Date(Date.now() + 60 * 60 * 1000); // 1 hora
+
+      await db.query(
+        `INSERT INTO password_resets (user_id, email, token_hash, expires_at, created_by)
+         VALUES (?, ?, ?, ?, ?)`,
+        [userId, email, tokenHash, expiresAt, req.user.sub]
+      );
+
+      const resetUrl = `${process.env.APP_URL}/reset-password?token=${token}`;
+
+      return res.status(201).send({
+        message: "Link de reseteo creado. Compártelo con el usuario.",
+        resetUrl,
+        expiresAt,
+      });
+    } catch (err) {
+      console.error("Error creando reset:", err);
+      return res.status(500).send({ message: "Error interno" });
+    }
+  }
+);
+
+router.post("/password/reset/confirm", async (req, res) => {
+  const { token, newPassword } = req.body;
+  if (!token || !newPassword) {
+    return res.status(400).send({ message: "token y newPassword requeridos" });
+  }
+  if (newPassword.length < 8) {
+    return res.status(400).send({ message: "La contraseña debe tener mínimo 8 caracteres" });
+  }
+
+  const tokenHash = crypto.createHash("sha256").update(token).digest("hex");
+  const conn = await db.getConnection();
+
+  try {
+    await conn.beginTransaction();
+
+    const [rows] = await conn.query(
+      `SELECT * FROM password_resets
+       WHERE token_hash = ? AND used_at IS NULL
+       LIMIT 1 FOR UPDATE`,
+      [tokenHash]
+    );
+
+    if (!rows.length) {
+      await conn.rollback();
+      return res.status(400).send({ message: "Token inválido" });
+    }
+
+    const pr = rows[0];
+    if (new Date(pr.expires_at) < new Date()) {
+      await conn.rollback();
+      return res.status(400).send({ message: "Token expirado" });
+    }
+
+    const hash = await bcrypt.hash(newPassword, 10);
+
+    await conn.query(
+      "UPDATE users SET password_hash = ? WHERE email = ?",
+      [hash, pr.email]
+    );
+
+    await conn.query("UPDATE password_resets SET used_at = NOW() WHERE id = ?", [pr.id]);
+
+    // (recomendado) invalidar sesiones: borrar refresh tokens de ese usuario
+    if (pr.user_id) {
+      await conn.query("DELETE FROM refresh_tokens WHERE user_id = ?", [pr.user_id]);
+    }
+
+    await conn.commit();
+    return res.status(200).send({ message: "Contraseña actualizada. Ya puedes iniciar sesión." });
+  } catch (err) {
+    await conn.rollback();
+    console.error("Error confirmando reset:", err);
+    return res.status(500).send({ message: "Error interno" });
+  } finally {
+    conn.release();
+  }
+});
 
 
 module.exports = router;
