@@ -1,51 +1,50 @@
-// routes/tratamientos.js
-const express = require("express");
-const db = require("../config/db");
-const router = express.Router({ mergeParams: true });
+// routes/patientTreatments.js
+const express = require("express")
+const db = require("../config/db")
+const router = express.Router({ mergeParams: true })
+const { logPatientEvent } = require("../utils/logPatientEvent")
 
-// Middleware para manejar errores
-const asyncHandler = (fn) => (req, res, next) => {
-  Promise.resolve(fn(req, res, next)).catch(next);
-};
+const asyncHandler = (fn) => (req, res, next) =>
+  Promise.resolve(fn(req, res, next)).catch(next)
 
-// ✅ ÚNICA FUENTE DE VERDAD
-const VALID_STATUSES = ["Por Iniciar", "En proceso", "Terminado"];
+const toMoney = (n) =>
+  new Intl.NumberFormat("es-MX", { style: "currency", currency: "MXN" }).format(
+    Number(n || 0)
+  )
 
-/**
- * Normaliza cualquier variante de status al set permitido.
- * - null/"" => "Por Iniciar"
- * - "por iniciar" / "Por iniciar" / "POR INICIAR" => "Por Iniciar"
- * - "en proceso" => "En proceso"
- * - "terminado" => "Terminado"
- * - cualquier otra cosa => null (para que truene con 400)
- */
+const VALID_STATUSES = ["Por Iniciar", "En proceso", "Terminado"]
+
 const normalizeStatus = (raw) => {
-  const v = String(raw ?? "").trim().toLowerCase();
+  const v = String(raw ?? "").trim().toLowerCase()
+  if (!v) return "Por Iniciar"
+  if (v === "terminado") return "Terminado"
+  if (v === "en proceso") return "En proceso"
+  if (v === "por iniciar") return "Por Iniciar"
+  return null
+}
 
-  if (!v) return "Por Iniciar";
-  if (v === "terminado") return "Terminado";
-  if (v === "en proceso") return "En proceso";
-  if (v === "por iniciar") return "Por Iniciar";
-
-  return null;
-};
-
-// Helper: normaliza números (evita NaN)
 const toNumber = (v) => {
-  const n = Number(v);
-  return Number.isFinite(n) ? n : null;
-};
+  const n = Number(v)
+  return Number.isFinite(n) ? n : null
+}
+
+// --- helper: detecta si existe una columna (evita "Unknown column")
+async function hasColumn(table, column) {
+  const [rows] = await db.query(
+    `SHOW COLUMNS FROM \`${table}\` LIKE ?`,
+    [column]
+  )
+  return rows.length > 0
+}
 
 /**
  * GET /api/pacientes/:patientId/tratamientos
- * Lista tratamientos (patient_services) del paciente, con service + category normalizada
- * (incluye group_id; si aún no tienes tabla groups, al menos ya viene group_id)
  */
 router.get(
   "/",
   asyncHandler(async (req, res) => {
-    const patientId = toNumber(req.params.patientId);
-    if (!patientId) return res.status(400).json({ error: "patientId inválido" });
+    const patientId = toNumber(req.params.patientId)
+    if (!patientId) return res.status(400).json({ error: "patientId inválido" })
 
     const query = `
       SELECT 
@@ -66,157 +65,317 @@ router.get(
       JOIN service_categories c ON c.id = s.category_id
       WHERE ps.patient_id = ?
       ORDER BY ps.service_date DESC, ps.id DESC
-    `;
+    `
 
-    const [rows] = await db.query(query, [patientId]);
-    res.json(rows);
+    const [rows] = await db.query(query, [patientId])
+    res.json(rows)
   })
-);
+)
 
 /**
  * POST /api/pacientes/:patientId/tratamientos
- * Crea un tratamiento (registro en patient_services)
- * Body: { service_id, service_date, notes?, total_cost?, status? }
+ * ✅ Acepta:
+ * - { service_id, service_date, ... } (uno)
+ * - { services: [{...}, {...}] } (varios)
+ * ✅ SIEMPRE crea group_id (aunque sea 1)
  */
 router.post(
   "/",
   asyncHandler(async (req, res) => {
-    const patientId = toNumber(req.params.patientId);
-    if (!patientId) return res.status(400).json({ error: "patientId inválido" });
+    const patientId = toNumber(req.params.patientId)
+    if (!patientId) return res.status(400).json({ error: "patientId inválido" })
 
-    const { service_id, service_date, notes, total_cost, status } = req.body;
+    const createdBy = req.user?.id ?? null
 
-    const sid = toNumber(service_id);
-    if (!sid) return res.status(400).json({ error: "service_id es obligatorio" });
-    if (!service_date) return res.status(400).json({ error: "service_date es obligatorio" });
+    const incoming = Array.isArray(req.body?.services)
+      ? req.body.services
+      : [req.body]
 
-    const cost = total_cost == null || total_cost === "" ? 0 : toNumber(total_cost);
-    if (cost == null) return res.status(400).json({ error: "total_cost no es válido" });
-
-    // ✅ normaliza status
-    const normalized = normalizeStatus(status);
-    if (!normalized || !VALID_STATUSES.includes(normalized)) {
-      return res.status(400).json({
-        error: "Estado no válido.",
-        valid: VALID_STATUSES,
-      });
+    if (!incoming.length) {
+      return res.status(400).json({ error: "services requerido" })
     }
 
-    // valida que exista el servicio
-    const [svc] = await db.query("SELECT id FROM services WHERE id = ? LIMIT 1", [sid]);
-    if (!svc.length) return res.status(400).json({ error: "service_id no existe" });
+    // validación base (primero)
+    for (const item of incoming) {
+      const sid = toNumber(item?.service_id)
+      if (!sid) return res.status(400).json({ error: "service_id es obligatorio" })
+      if (!item?.service_date) return res.status(400).json({ error: "service_date es obligatorio" })
 
-    const [result] = await db.query(
+      const normalized = normalizeStatus(item?.status)
+      if (!normalized || !VALID_STATUSES.includes(normalized)) {
+        return res.status(400).json({ error: "Estado no válido.", valid: VALID_STATUSES })
+      }
+
+      const [svc] = await db.query("SELECT id FROM services WHERE id = ? LIMIT 1", [sid])
+      if (!svc.length) return res.status(400).json({ error: `service_id ${sid} no existe` })
+
+      const cost = item.total_cost == null || item.total_cost === "" ? 0 : toNumber(item.total_cost)
+      if (cost == null) return res.status(400).json({ error: "total_cost no es válido" })
+    }
+
+    // columna created_by opcional
+    const patientServicesHasCreatedBy = await hasColumn("patient_services", "created_by")
+
+    // 1) inserta el primero sin group_id (temporal)
+    const first = incoming[0]
+    const firstSid = toNumber(first.service_id)
+    const firstCost =
+      first.total_cost == null || first.total_cost === "" ? 0 : toNumber(first.total_cost)
+    const firstStatus = normalizeStatus(first.status)
+
+    let insFirst
+    if (patientServicesHasCreatedBy) {
+      ;[insFirst] = await db.query(
+        `
+        INSERT INTO patient_services
+          (patient_id, service_id, service_date, notes, status, total_cost, group_id, created_by, created_at, updated_at)
+        VALUES
+          (?, ?, ?, ?, ?, ?, NULL, ?, NOW(), NOW())
+        `,
+        [
+          patientId,
+          firstSid,
+          first.service_date,
+          first.notes || null,
+          firstStatus,
+          Number(firstCost || 0),
+          createdBy,
+        ]
+      )
+    } else {
+      ;[insFirst] = await db.query(
+        `
+        INSERT INTO patient_services
+          (patient_id, service_id, service_date, notes, status, total_cost, group_id, created_at, updated_at)
+        VALUES
+          (?, ?, ?, ?, ?, ?, NULL, NOW(), NOW())
+        `,
+        [
+          patientId,
+          firstSid,
+          first.service_date,
+          first.notes || null,
+          firstStatus,
+          Number(firstCost || 0),
+        ]
+      )
+    }
+
+    const firstId = insFirst.insertId
+    const groupId = firstId
+
+    // 2) set group_id del primero
+    await db.query(
+      `UPDATE patient_services SET group_id = ?, updated_at = NOW() WHERE id = ? AND patient_id = ?`,
+      [groupId, firstId, patientId]
+    )
+
+    // 3) inserta el resto con group_id
+    for (const item of incoming.slice(1)) {
+      const sid = toNumber(item.service_id)
+      const cost = item.total_cost == null || item.total_cost === "" ? 0 : toNumber(item.total_cost)
+      const st = normalizeStatus(item.status)
+
+      if (patientServicesHasCreatedBy) {
+        await db.query(
+          `
+          INSERT INTO patient_services
+            (patient_id, service_id, service_date, notes, status, total_cost, group_id, created_by, created_at, updated_at)
+          VALUES
+            (?, ?, ?, ?, ?, ?, ?, ?, NOW(), NOW())
+          `,
+          [
+            patientId,
+            sid,
+            item.service_date,
+            item.notes || null,
+            st,
+            Number(cost || 0),
+            groupId,
+            createdBy,
+          ]
+        )
+      } else {
+        await db.query(
+          `
+          INSERT INTO patient_services
+            (patient_id, service_id, service_date, notes, status, total_cost, group_id, created_at, updated_at)
+          VALUES
+            (?, ?, ?, ?, ?, ?, ?, NOW(), NOW())
+          `,
+          [
+            patientId,
+            sid,
+            item.service_date,
+            item.notes || null,
+            st,
+            Number(cost || 0),
+            groupId,
+          ]
+        )
+      }
+    }
+
+    // 4) responder con los creados del group
+    const [rows] = await db.query(
       `
-      INSERT INTO patient_services
-        (patient_id, service_id, service_date, notes, status, total_cost, created_at, updated_at)
-      VALUES
-        (?, ?, ?, ?, ?, ?, NOW(), NOW())
+      SELECT
+        ps.id AS treatment_id,
+        ps.patient_id,
+        ps.service_id,
+        ps.service_date,
+        ps.total_cost,
+        ps.status,
+        ps.group_id,
+        s.name AS service_name
+      FROM patient_services ps
+      LEFT JOIN services s ON s.id = ps.service_id
+      WHERE ps.patient_id = ? AND ps.group_id = ?
+      ORDER BY ps.id ASC
       `,
-      [patientId, sid, service_date, notes || null, normalized, cost]
-    );
+      [patientId, groupId]
+    )
 
     res.status(201).json({
-      message: "Tratamiento creado exitosamente.",
-      id: result.insertId,
-    });
+      message: "Tratamiento(s) creado(s) exitosamente.",
+      group_id: groupId,
+      items: rows,
+    })
   })
-);
+)
 
 /**
  * PATCH /api/pacientes/:patientId/tratamientos/:treatmentId
- * Actualización parcial (costo / notas / fecha / service_id)
- * Body soportado: { total_cost?, notes?, service_date?, service_id? }
+ * Actualiza campos variados
  */
 router.patch(
   "/:treatmentId",
   asyncHandler(async (req, res) => {
-    const patientId = toNumber(req.params.patientId);
-    const treatmentId = toNumber(req.params.treatmentId);
-    if (!patientId) return res.status(400).json({ error: "patientId inválido" });
-    if (!treatmentId) return res.status(400).json({ error: "treatmentId inválido" });
+    const patientId = toNumber(req.params.patientId)
+    const treatmentId = toNumber(req.params.treatmentId)
 
-    const { total_cost, notes, service_date, service_id } = req.body;
+    if (!patientId) return res.status(400).json({ error: "patientId inválido" })
+    if (!treatmentId) return res.status(400).json({ error: "treatmentId inválido" })
 
-    // Construir SET dinámico
-    const sets = [];
-    const values = [];
+    const { total_cost, notes, service_date, service_id, status } = req.body
+
+    // cargar previo (para log de costo)
+    let oldCost = null
+    let newCost = null
 
     if (total_cost !== undefined) {
-      const cost = total_cost == null || total_cost === "" ? 0 : toNumber(total_cost);
-      if (cost == null) return res.status(400).json({ error: "total_cost no es válido" });
-      sets.push("total_cost = ?");
-      values.push(cost);
+      const [[prev]] = await db.query(
+        `SELECT total_cost, group_id FROM patient_services WHERE id = ? AND patient_id = ? LIMIT 1`,
+        [treatmentId, patientId]
+      )
+      if (!prev) return res.status(404).json({ error: "Tratamiento no encontrado." })
+
+      oldCost = Number(prev.total_cost || 0)
+      newCost = total_cost == null || total_cost === "" ? 0 : toNumber(total_cost)
+      if (newCost == null) return res.status(400).json({ error: "total_cost no es válido" })
+    }
+
+    const sets = []
+    const values = []
+
+    if (total_cost !== undefined) {
+      sets.push("total_cost = ?")
+      values.push(newCost)
     }
 
     if (notes !== undefined) {
-      sets.push("notes = ?");
-      values.push(notes || null);
+      sets.push("notes = ?")
+      values.push(notes || null)
     }
 
     if (service_date !== undefined) {
-      if (!service_date) return res.status(400).json({ error: "service_date no es válido" });
-      sets.push("service_date = ?");
-      values.push(service_date);
+      if (!service_date) return res.status(400).json({ error: "service_date no es válido" })
+      sets.push("service_date = ?")
+      values.push(service_date)
     }
 
     if (service_id !== undefined) {
-      const sid = toNumber(service_id);
-      if (!sid) return res.status(400).json({ error: "service_id no es válido" });
+      const sid = toNumber(service_id)
+      if (!sid) return res.status(400).json({ error: "service_id no es válido" })
 
-      // valida que exista el servicio
-      const [svc] = await db.query("SELECT id FROM services WHERE id = ? LIMIT 1", [sid]);
-      if (!svc.length) return res.status(400).json({ error: "service_id no existe" });
+      const [svc] = await db.query("SELECT id FROM services WHERE id = ? LIMIT 1", [sid])
+      if (!svc.length) return res.status(400).json({ error: "service_id no existe" })
 
-      sets.push("service_id = ?");
-      values.push(sid);
+      sets.push("service_id = ?")
+      values.push(sid)
+    }
+
+    if (status !== undefined) {
+      const normalized = normalizeStatus(status)
+      if (!normalized || !VALID_STATUSES.includes(normalized)) {
+        return res.status(400).json({ error: "Estado no válido.", valid: VALID_STATUSES })
+      }
+      sets.push("status = ?")
+      values.push(normalized)
     }
 
     if (sets.length === 0) {
-      return res.status(400).json({ error: "No hay campos para actualizar." });
+      return res.status(400).json({ error: "No hay campos para actualizar." })
     }
 
-    sets.push("updated_at = NOW()");
+    sets.push("updated_at = NOW()")
 
-    // Importante: asegurar que el tratamiento pertenece al paciente
     const query = `
       UPDATE patient_services
       SET ${sets.join(", ")}
       WHERE id = ? AND patient_id = ?
-    `;
-    values.push(treatmentId, patientId);
+    `
+    values.push(treatmentId, patientId)
 
-    const [result] = await db.query(query, values);
+    const [result] = await db.query(query, values)
 
     if (result.affectedRows === 0) {
-      return res.status(404).json({ error: "Tratamiento no encontrado." });
+      return res.status(404).json({ error: "Tratamiento no encontrado." })
     }
 
-    res.status(200).json({ message: "Tratamiento actualizado exitosamente." });
+    // log de cambio de costo
+    if (total_cost !== undefined && oldCost !== null && newCost !== null && oldCost !== newCost) {
+      // resolver group_id para el evento (siempre debería existir)
+      const [[ps]] = await db.query(
+        `SELECT group_id FROM patient_services WHERE id = ? AND patient_id = ? LIMIT 1`,
+        [treatmentId, patientId]
+      )
+      const gid = ps?.group_id ? Number(ps.group_id) : null
+
+      await logPatientEvent({
+        patientId,
+        patientServiceId: treatmentId,
+        patientServiceGroupId: gid,
+        eventType: "cost_changed",
+        message: `Costo actualizado: ${toMoney(oldCost)} → ${toMoney(newCost)}`,
+        meta: { old_cost: oldCost, new_cost: newCost },
+        createdBy: req.user?.id ?? null,
+      })
+    }
+
+    res.status(200).json({
+      message: "Tratamiento actualizado exitosamente.",
+    })
   })
-);
+)
 
 /**
  * PUT /api/pacientes/:patientId/tratamientos/:treatmentId/status
- * Actualizar status de un tratamiento (normaliza + valida)
- * Body: { status }
  */
 router.put(
   "/:treatmentId/status",
   asyncHandler(async (req, res) => {
-    const patientId = toNumber(req.params.patientId);
-    const treatmentId = toNumber(req.params.treatmentId);
-    if (!patientId) return res.status(400).json({ error: "patientId inválido" });
-    if (!treatmentId) return res.status(400).json({ error: "treatmentId inválido" });
+    const patientId = toNumber(req.params.patientId)
+    const treatmentId = toNumber(req.params.treatmentId)
 
-    const { status } = req.body;
+    if (!patientId) return res.status(400).json({ error: "patientId inválido" })
+    if (!treatmentId) return res.status(400).json({ error: "treatmentId inválido" })
 
-    const normalized = normalizeStatus(status);
+    const { status } = req.body
+    const normalized = normalizeStatus(status)
+
     if (!normalized || !VALID_STATUSES.includes(normalized)) {
-      return res.status(400).json({
-        error: "Estado no válido.",
-        valid: VALID_STATUSES,
-      });
+      return res.status(400).json({ error: "Estado no válido.", valid: VALID_STATUSES })
     }
 
     const [result] = await db.query(
@@ -224,43 +383,104 @@ router.put(
        SET status = ?, updated_at = NOW()
        WHERE id = ? AND patient_id = ?`,
       [normalized, treatmentId, patientId]
-    );
+    )
 
     if (result.affectedRows === 0) {
-      return res.status(404).json({
-        error: "Tratamiento no encontrado para este paciente.",
-      });
+      return res.status(404).json({ error: "Tratamiento no encontrado para este paciente." })
     }
 
-    res.json({ message: "Estado actualizado exitosamente." });
+    res.json({ message: "Estado actualizado exitosamente." })
   })
-);
+)
+
+/**
+ * PUT /api/pacientes/:patientId/tratamientos/:treatmentId/costo
+ * Body: { total_cost }
+ */
+router.put(
+  "/:treatmentId/costo",
+  asyncHandler(async (req, res) => {
+    const patientId = toNumber(req.params.patientId)
+    const treatmentId = toNumber(req.params.treatmentId)
+
+    if (!patientId) return res.status(400).json({ error: "patientId inválido" })
+    if (!treatmentId) return res.status(400).json({ error: "treatmentId inválido" })
+
+    const newCost = req.body?.total_cost == null || req.body?.total_cost === ""
+      ? 0
+      : toNumber(req.body?.total_cost)
+
+    if (newCost == null) {
+      return res.status(400).json({ error: "total_cost inválido" })
+    }
+
+    // leer previo + group
+    const [[prev]] = await db.query(
+      `SELECT total_cost, group_id
+       FROM patient_services
+       WHERE id = ? AND patient_id = ?
+       LIMIT 1`,
+      [treatmentId, patientId]
+    )
+
+    if (!prev) return res.status(404).json({ error: "Tratamiento no encontrado." })
+
+    const oldCost = Number(prev.total_cost || 0)
+    const gid = prev?.group_id ? Number(prev.group_id) : null
+
+    await db.query(
+      `UPDATE patient_services
+       SET total_cost = ?, updated_at = NOW()
+       WHERE id = ? AND patient_id = ?`,
+      [newCost, treatmentId, patientId]
+    )
+
+    if (oldCost !== newCost) {
+      await logPatientEvent({
+        patientId,
+        patientServiceId: treatmentId,
+        patientServiceGroupId: gid,
+        eventType: "cost_changed",
+        message: `Costo actualizado: ${toMoney(oldCost)} → ${toMoney(newCost)}`,
+        meta: { old_cost: oldCost, new_cost: newCost },
+        createdBy: req.user?.id ?? null,
+      })
+    }
+
+    res.json({ ok: true, total_cost: newCost })
+  })
+)
 
 /**
  * DELETE /api/pacientes/:patientId/tratamientos/:treatmentId
- * Elimina un tratamiento (patient_services)
+ * ✅ recomendado: borra eventos relacionados para no dejar huérfanos
  */
 router.delete(
   "/:treatmentId",
   asyncHandler(async (req, res) => {
-    const patientId = toNumber(req.params.patientId);
-    const treatmentId = toNumber(req.params.treatmentId);
-    if (!patientId) return res.status(400).json({ error: "patientId inválido" });
-    if (!treatmentId) return res.status(400).json({ error: "treatmentId inválido" });
+    const patientId = toNumber(req.params.patientId)
+    const treatmentId = toNumber(req.params.treatmentId)
+
+    if (!patientId) return res.status(400).json({ error: "patientId inválido" })
+    if (!treatmentId) return res.status(400).json({ error: "treatmentId inválido" })
+
+    // borra eventos del treatment
+    await db.query(
+      `DELETE FROM patient_treatment_events WHERE patient_id = ? AND patient_service_id = ?`,
+      [patientId, treatmentId]
+    )
 
     const [result] = await db.query(
       "DELETE FROM patient_services WHERE id = ? AND patient_id = ?",
       [treatmentId, patientId]
-    );
+    )
 
     if (result.affectedRows === 0) {
-      return res
-        .status(404)
-        .json({ error: "Tratamiento no encontrado en la base de datos." });
+      return res.status(404).json({ error: "Tratamiento no encontrado en la base de datos." })
     }
 
-    res.status(200).json({ message: "Tratamiento eliminado exitosamente." });
+    res.status(200).json({ message: "Tratamiento eliminado exitosamente." })
   })
-);
+)
 
-module.exports = router;
+module.exports = router

@@ -23,7 +23,8 @@ const uploadRoutes = require("./routes/uploads");
 const testRoutes = require("./routes/test");
 const tratamientosRoutes = require("./routes/tratamientos");
 const patientSummaryTtsRoutes = require("./routes/patientSummaryTts");
-const aiRoutes = require("./routes/ai"); // ✅ FALTABA
+const aiRoutes = require("./routes/ai");
+const patientTreatmentEventsRoutes = require("./routes/patientTreatmentEvents");
 
 const { authenticateJwt } = require("./middleware/auth");
 
@@ -34,7 +35,7 @@ app.use(express.json());
 app.use(express.urlencoded({ extended: true }));
 app.use(cookieParser());
 
-// ✅ (si usas cookie token) convertir cookie->Authorization ANTES de authenticateJwt
+// cookie -> Authorization
 app.use((req, _res, next) => {
   if (!req.headers.authorization && req.cookies?.token) {
     req.headers.authorization = `Bearer ${req.cookies.token}`;
@@ -42,7 +43,7 @@ app.use((req, _res, next) => {
   next();
 });
 
-// CORS antes de rutas
+// CORS
 const staticOrigins = (process.env.CORS_ORIGINS || "")
   .split(",")
   .map((origin) => origin.trim())
@@ -79,12 +80,18 @@ app.use("/api/auth", authRoutes);
 app.use("/api/test", testRoutes);
 app.use("/api/uploads", uploadRoutes);
 
-// ✅ AI protegido (ya con CORS y cookie->auth listo)
+// Protected
 app.use("/api/ai", authenticateJwt, aiRoutes);
 
-// Protected nested
+// ✅ Protected nested (aquí va events)
 app.use("/api/pacientes/:patientId/pagos", authenticateJwt, paymentsRoutes);
 app.use("/api/pacientes/:patientId/citas", authenticateJwt, citasRoutes);
+app.use(
+  "/api/pacientes/:patientId/events",
+  authenticateJwt,
+  patientTreatmentEventsRoutes
+);
+
 app.use(
   "/api/pacientes/:patientId/tratamientos/:treatmentId/evidencias",
   authenticateJwt,
@@ -99,7 +106,7 @@ app.use("/api/clinical-histories", authenticateJwt, clinicalHistoryRoutes);
 app.use("/api/servicios", authenticateJwt, servicioRoutes);
 app.use("/api/email", authenticateJwt, emailRoutes);
 
-// Error handler
+// ✅ Error handler SIEMPRE al final
 app.use((err, req, res, next) => {
   console.error(err.stack);
   res.status(err.status || 500).json({
