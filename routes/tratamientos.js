@@ -6,6 +6,88 @@ const router = express.Router({ mergeParams: true })
 const { logPatientEvent } = require("../utils/logPatientEvent")
 const { normalizeToothCodes, replaceServiceTeeth } = require("../utils/teeth")
 
+const multer = require("multer")
+const AWS = require("aws-sdk")
+
+AWS.config.update({
+  accessKeyId: process.env.AWS_ACCESS_KEY_ID,
+  secretAccessKey: process.env.AWS_SECRET_ACCESS_KEY,
+  region: process.env.AWS_REGION,
+})
+
+const s3 = new AWS.S3()
+const upload = multer({ storage: multer.memoryStorage() })
+
+const S3_BUCKET = process.env.AWS_S3_BUCKET || "implaeden"
+
+const normalizeText = (v) =>
+  String(v ?? "")
+    .trim()
+    .toLowerCase()
+    .replace(/\s+/g, "_")
+
+const normalizeDocType = (raw) => {
+  const v = normalizeText(raw)
+
+  // ✅ aceptamos valores “bonitos” que tu UI podría mandar
+  if (v === "budget" || v === "presupuesto") return "budget"
+
+  if (
+    v === "start_letter" ||
+    v === "carta_inicio" ||
+    v === "inicio" ||
+    v === "carta_de_inicio"
+  )
+    return "start_letter"
+
+  if (
+    v === "end_letter" ||
+    v === "carta_fin" ||
+    v === "fin" ||
+    v === "carta_de_fin"
+  )
+    return "end_letter"
+
+  return null
+}
+
+const safeFileName = (name) =>
+  String(name || "file")
+    .replace(/[^\w.\-]+/g, "_")
+    .slice(0, 120)
+
+const buildS3Key = ({ patientId, treatmentId, docType, originalname }) => {
+  const ts = Date.now()
+  const clean = safeFileName(originalname)
+  // puedes cambiar el folder si quieres
+  return `clinical_histories/patient_${patientId}/treatment_${treatmentId}/${docType}/${ts}_${clean}`
+}
+
+const uploadFileToS3 = async ({ key, file }) => {
+  const params = {
+    Bucket: S3_BUCKET,
+    Key: key,
+    Body: file.buffer,
+    ContentType: file.mimetype,
+  }
+  const out = await s3.upload(params).promise()
+  return out.Location
+}
+
+const extractS3KeyFromUrl = (fileUrl) => {
+  try {
+    const u = new URL(fileUrl)
+    // pathname viene como "/clinical_histories/...."
+    return decodeURIComponent(u.pathname.replace(/^\/+/, ""))
+  } catch {
+    // fallback: intenta por split
+    const idx = String(fileUrl || "").indexOf("amazonaws.com/")
+    if (idx === -1) return null
+    return String(fileUrl).slice(idx + "amazonaws.com/".length)
+  }
+}
+
+
 const asyncHandler = (fn) => (req, res, next) =>
   Promise.resolve(fn(req, res, next)).catch(next)
 
@@ -626,17 +708,15 @@ router.delete(
   })
 )
 
-/* ======================================================================
-   ✅ DOCUMENTOS (tabla REAL: service_documents)
-   Rutas que usa tu hook:
-   - GET  /api/pacientes/:patientId/tratamientos/:treatmentId/documentos
-   - POST /api/pacientes/:patientId/tratamientos/:treatmentId/documentos
-   - (DELETE ya lo tienes como /api/servicios/documentos/:docId)
-   ====================================================================== */
+// ======================================================================
+// ✅ DOCUMENTOS (tabla: service_documents)
+// Endpoints:
+// GET    /api/pacientes/:patientId/tratamientos/:treatmentId/documentos
+// POST   /api/pacientes/:patientId/tratamientos/:treatmentId/documentos
+// DELETE /api/pacientes/:patientId/tratamientos/documentos/:docId   (opcional)
+// ======================================================================
 
-/**
- * GET /api/pacientes/:patientId/tratamientos/:treatmentId/documentos
- */
+// ✅ GET documentos
 router.get(
   "/:treatmentId/documentos",
   asyncHandler(async (req, res) => {
@@ -670,18 +750,13 @@ router.get(
   })
 )
 
-/**
- * POST /api/pacientes/:patientId/tratamientos/:treatmentId/documentos
- * Soporta:
- * - 1 archivo: req.file
- * - varios: req.files (si usas multer .array('file') o .fields)
- *
- * Nota: aquí ASUMO que tu middleware de upload ya te deja:
- * - req.files => [{ location|url|path, ... }, ...] o file_url en algún lado
- * Ajusta la forma de sacar la URL según tu uploader.
- */
+// ✅ POST documentos (sube a S3 y guarda en DB)
+// FormData esperado:
+// - document_type (o documentType / type)
+// - file (puede venir repetido para múltiples)
 router.post(
   "/:treatmentId/documentos",
+  upload.array("file", 10),
   asyncHandler(async (req, res) => {
     const patientId = toNumber(req.params.patientId)
     const treatmentId = toNumber(req.params.treatmentId)
@@ -704,43 +779,46 @@ router.post(
     )
     if (!own) return res.status(404).json({ error: "Tratamiento no encontrado." })
 
-    const documentType = String(req.body?.document_type || "").trim()
-    if (!VALID_DOC_TYPES.includes(documentType)) {
+    // acepta varias llaves por si tu front manda diferente
+    const rawType =
+      req.body?.document_type ?? req.body?.documentType ?? req.body?.type ?? ""
+
+    const documentType = normalizeDocType(rawType)
+    if (!documentType || !VALID_DOC_TYPES.includes(documentType)) {
       return res.status(400).json({
         error: "document_type inválido",
         valid: VALID_DOC_TYPES,
+        received: rawType,
       })
     }
 
-    const createdAt = req.body?.created_at ? new Date(req.body.created_at) : new Date()
+    if (!req.files || req.files.length === 0) {
+      return res.status(400).json({ error: "No se ha subido ningún archivo." })
+    }
+
+    const createdAtRaw = req.body?.created_at
+    const createdAt = createdAtRaw ? new Date(createdAtRaw) : new Date()
     if (Number.isNaN(createdAt.getTime())) {
       return res.status(400).json({ error: "created_at inválido" })
     }
-
-    // Normaliza archivos (1 o muchos)
-    const files = []
-    if (Array.isArray(req.files) && req.files.length) files.push(...req.files)
-    if (req.file) files.push(req.file)
-
-    // Si tu flujo NO sube por multer aquí (sino que mandas file_url directo),
-    // también soportamos: req.body.file_url
-    const bodyUrl = String(req.body?.file_url || "").trim()
-    if (!files.length && !bodyUrl) {
-      return res.status(400).json({ error: "Falta archivo(s) o file_url." })
-    }
-
-    // Helper para sacar URL según tu uploader
-    const fileToUrl = (f) =>
-      f?.location || f?.url || f?.secure_url || f?.file_url || f?.path || null
-
-    const urlsFromFiles = files.map(fileToUrl).filter(Boolean)
-    const urls = urlsFromFiles.length ? urlsFromFiles : [bodyUrl].filter(Boolean)
 
     const conn = await db.getConnection()
     try {
       await conn.beginTransaction()
 
-      for (const url of urls) {
+      // 1) subir a S3
+      const uploadedUrls = []
+      for (const file of req.files) {
+        const key = buildS3Key({
+          patientId,
+          treatmentId,
+          docType: documentType,
+          originalname: file.originalname,
+        })
+        const url = await uploadFileToS3({ key, file })
+        uploadedUrls.push(url)
+
+        // 2) guardar en DB
         await conn.query(
           `
           INSERT INTO service_documents
@@ -753,26 +831,74 @@ router.post(
       }
 
       await conn.commit()
+
+      // respuesta: lista actualizada
+      const [rows] = await db.query(
+        `
+        SELECT id, patient_service_id, document_type, file_url, created_at, updated_at
+        FROM service_documents
+        WHERE patient_service_id = ?
+        ORDER BY created_at DESC, id DESC
+        `,
+        [treatmentId]
+      )
+
+      res.status(201).json(rows)
     } catch (e) {
       await conn.rollback()
       throw e
     } finally {
       conn.release()
     }
-
-    // devuelve lista actualizada (comodín para tu hook)
-    const [rows] = await db.query(
-      `
-      SELECT id, patient_service_id, document_type, file_url, created_at, updated_at
-      FROM service_documents
-      WHERE patient_service_id = ?
-      ORDER BY created_at DESC, id DESC
-      `,
-      [treatmentId]
-    )
-
-    res.status(201).json(rows)
   })
 )
+
+// ✅ DELETE documento (opcional, por si quieres moverlo aquí)
+// Endpoint sugerido:
+// DELETE /api/pacientes/:patientId/tratamientos/documentos/:docId
+// DELETE /api/pacientes/:patientId/tratamientos/:treatmentId/documentos/:docId
+router.delete(
+  "/:treatmentId/documentos/:docId",
+  asyncHandler(async (req, res) => {
+    const patientId = toNumber(req.params.patientId)
+    const treatmentId = toNumber(req.params.treatmentId)
+    const docId = toNumber(req.params.docId)
+
+    if (!patientId) return res.status(400).json({ error: "patientId inválido" })
+    if (!treatmentId) return res.status(400).json({ error: "treatmentId inválido" })
+    if (!docId) return res.status(400).json({ error: "docId inválido" })
+
+    const docsTableExists = await hasTable("service_documents")
+    if (!docsTableExists) return res.status(404).json({ error: "Documento no encontrado." })
+
+    // 1) valida que el documento pertenezca al treatment y al paciente
+    const [[doc]] = await db.query(
+      `
+      SELECT d.id, d.file_url
+      FROM service_documents d
+      JOIN patient_services ps ON ps.id = d.patient_service_id
+      WHERE d.id = ?
+        AND d.patient_service_id = ?
+        AND ps.patient_id = ?
+      LIMIT 1
+      `,
+      [docId, treatmentId, patientId]
+    )
+
+    if (!doc) return res.status(404).json({ error: "Documento no encontrado." })
+
+    // 2) borra en S3 (si se puede obtener el key)
+    const key = extractS3KeyFromUrl(doc.file_url)
+    if (key) {
+      await s3.deleteObject({ Bucket: S3_BUCKET, Key: key }).promise()
+    }
+
+    // 3) borra en DB
+    await db.query(`DELETE FROM service_documents WHERE id = ?`, [docId])
+
+    res.json({ message: "Documento eliminado exitosamente." })
+  })
+)
+
 
 module.exports = router
