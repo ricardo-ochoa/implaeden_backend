@@ -12,18 +12,20 @@ require("dotenv").config({
 
 // Routers
 const authRoutes = require("./routes/auth");
-const treatmentEvidencesRoutes = require("./routes/treatmentEvidences");
+const testRoutes = require("./routes/test");
+const uploadRoutes = require("./routes/uploads");
+
+const aiRoutes = require("./routes/ai");
 const pacienteRoutes = require("./routes/pacientes");
 const clinicalHistoryRoutes = require("./routes/clinicalHistories");
 const servicioRoutes = require("./routes/servicios");
-const paymentsRoutes = require("./routes/payments");
 const emailRoutes = require("./routes/email");
+
+const paymentsRoutes = require("./routes/payments");
 const citasRoutes = require("./routes/citas");
-const uploadRoutes = require("./routes/uploads");
-const testRoutes = require("./routes/test");
 const tratamientosRoutes = require("./routes/tratamientos");
+const treatmentEvidencesRoutes = require("./routes/treatmentEvidences");
 const patientSummaryTtsRoutes = require("./routes/patientSummaryTts");
-const aiRoutes = require("./routes/ai");
 const patientTreatmentEventsRoutes = require("./routes/patientTreatmentEvents");
 
 const { authenticateJwt } = require("./middleware/auth");
@@ -70,27 +72,51 @@ require("./auth/passport");
 app.use(passport.initialize());
 
 // Logging
-app.use((req, res, next) => {
+app.use((req, _res, next) => {
   console.log(`→ [${env}] ${req.method} ${req.originalUrl}`);
   next();
 });
 
-// Public
+// Evita 304 por ETag en API
+app.disable("etag");
+
+// Evita cache en /api
+app.use("/api", (req, res, next) => {
+  res.setHeader("Cache-Control", "no-store, no-cache, must-revalidate, proxy-revalidate");
+  res.setHeader("Pragma", "no-cache");
+  res.setHeader("Expires", "0");
+  res.setHeader("Surrogate-Control", "no-store");
+  next();
+});
+
+
+/**
+ * =========================
+ * PUBLIC ROUTES
+ * =========================
+ */
 app.use("/api/auth", authRoutes);
 app.use("/api/test", testRoutes);
 app.use("/api/uploads", uploadRoutes);
 
-// Protected
+/**
+ * =========================
+ * PROTECTED ROUTES (GENERAL)
+ * =========================
+ */
 app.use("/api/ai", authenticateJwt, aiRoutes);
+app.use("/api/clinical-histories", authenticateJwt, clinicalHistoryRoutes);
+app.use("/api/servicios", authenticateJwt, servicioRoutes);
+app.use("/api/email", authenticateJwt, emailRoutes);
 
-// ✅ Protected nested (aquí va events)
+/**
+ * =========================
+ * PROTECTED ROUTES (NESTED)
+ * =========================
+ */
 app.use("/api/pacientes/:patientId/pagos", authenticateJwt, paymentsRoutes);
 app.use("/api/pacientes/:patientId/citas", authenticateJwt, citasRoutes);
-app.use(
-  "/api/pacientes/:patientId/events",
-  authenticateJwt,
-  patientTreatmentEventsRoutes
-);
+app.use("/api/pacientes/:patientId/events", authenticateJwt, patientTreatmentEventsRoutes);
 
 app.use(
   "/api/pacientes/:patientId/tratamientos/:treatmentId/evidencias",
@@ -100,14 +126,15 @@ app.use(
 app.use("/api/pacientes/:patientId/tratamientos", authenticateJwt, tratamientosRoutes);
 app.use("/api/pacientes/:patientId", authenticateJwt, patientSummaryTtsRoutes);
 
-// Protected main
+// ✅ MAIN al final
 app.use("/api/pacientes", authenticateJwt, pacienteRoutes);
-app.use("/api/clinical-histories", authenticateJwt, clinicalHistoryRoutes);
-app.use("/api/servicios", authenticateJwt, servicioRoutes);
-app.use("/api/email", authenticateJwt, emailRoutes);
 
-// ✅ Error handler SIEMPRE al final
-app.use((err, req, res, next) => {
+/**
+ * =========================
+ * ERROR HANDLER (LAST)
+ * =========================
+ */
+app.use((err, _req, res, _next) => {
   console.error(err.stack);
   res.status(err.status || 500).json({
     error: "Ocurrió un error en el servidor",

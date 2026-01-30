@@ -19,7 +19,6 @@ router.get("/:patientId/summary", async (req, res) => {
   }
 })
 
-
 // Middleware para manejar errores
 const asyncHandler = (fn) => (req, res, next) => {
   Promise.resolve(fn(req, res, next)).catch(next);
@@ -191,138 +190,102 @@ router.get(
   '/:id/tratamientos',
   asyncHandler(async (req, res) => {
     const { id } = req.params
+
     const query = `
       SELECT 
-        ps.id AS treatment_id, 
-        ps.service_date, 
+        ps.id         AS treatment_id,
+        ps.patient_id AS patient_id,
+        ps.group_id   AS group_id,
+        g.title       AS group_title,
+        g.start_date  AS group_start_date,
+
+        ps.service_id,
+        ps.service_date,
+        ps.notes,
         ps.status,
-        ps.total_cost AS total_cost,
-        s.name AS service_name,
-        sc.name AS service_category,
-        sc.id   AS service_category_id
+        ps.total_cost,
+        ps.quantity,
+
+        s.name        AS service_name,
+        sc.id         AS service_category_id,
+        sc.name       AS service_category,
+        sc.sort_order AS service_category_sort_order
       FROM patient_services ps
-      JOIN services s ON ps.service_id = s.id
+      LEFT JOIN patient_service_groups g ON g.id = ps.group_id
+      JOIN services s ON s.id = ps.service_id
       JOIN service_categories sc ON sc.id = s.category_id
       WHERE ps.patient_id = ?
-      ORDER BY ps.service_date DESC
+      ORDER BY COALESCE(g.start_date, ps.service_date) DESC, ps.service_date DESC, ps.id DESC
     `
+
     const [rows] = await db.query(query, [id])
     res.json(rows)
   })
 )
 
+router.patch(
+  '/:patientId/tratamientos/:treatmentId',
+  asyncHandler(async (req, res) => {
+    const patientId = Number(req.params.patientId)
+    const treatmentId = Number(req.params.treatmentId)
 
-router.get('/:patientId/summary', async (req, res) => {
-  const patientId = Number(req.params.patientId);
-
-  if (!patientId) {
-    return res.status(400).json({ error: 'patientId inválido' });
-  }
-
-  try {
-    const conn = await pool.getConnection();
-
-    try {
-      // 1) Info básica del paciente
-      const [patientRows] = await conn.query(
-        `
-        SELECT 
-          id, nombre, apellidos, telefono, email, fecha_nacimiento
-        FROM pacientes
-        WHERE id = ?
-        `,
-        [patientId]
-      );
-      const patient = patientRows[0] || null;
-
-      // 2) Último servicio realizado
-      const [serviceRows] = await conn.query(
-        `
-       SELECT 
-            ps.id,
-            ps.service_date,
-            ps.notes,
-            ps.status,
-            ps.total_cost,
-            s.name AS service_name,
-            c.name AS service_category,
-            c.id   AS service_category_id
-          FROM patient_services ps
-          JOIN services s ON s.id = ps.service_id
-          JOIN service_categories c ON c.id = s.category_id
-          WHERE ps.patient_id = ?
-          ORDER BY ps.service_date DESC
-          LIMIT 1
-        `,
-        [patientId]
-      );
-      const lastService = serviceRows[0] || null;
-
-      // 3) Próxima cita (hoy en adelante)
-      const [appointmentRows] = await conn.query(
-        `
-        SELECT 
-          c.id,
-          c.appointment_at,
-          c.observaciones,
-          s.name AS service_name,
-          sc.name AS service_category,
-          sc.id   AS service_category_id
-        FROM citas c
-        JOIN services s ON s.id = c.service_id
-        JOIN service_categories sc ON sc.id = s.category_id
-        WHERE c.patient_id = ?
-          AND c.appointment_at >= NOW()
-        ORDER BY c.appointment_at ASC
-        LIMIT 1
-        `,
-        [patientId]
-      );
-      const nextAppointment = appointmentRows[0] || null;
-
-      // 4) Último pago
-      const [paymentRows] = await conn.query(
-        `
-        SELECT 
-          pp.id,
-          pp.fecha,
-          pp.tratamiento,
-          pp.monto,
-          pm.name AS payment_method,
-          ps2.name AS payment_status
-        FROM patient_payments AS pp
-        LEFT JOIN payment_methods   AS pm  ON pm.id  = pp.payment_method_id
-        LEFT JOIN payment_statuses  AS ps2 ON ps2.id = pp.payment_status_id
-        WHERE pp.patient_id = ?
-        ORDER BY pp.fecha DESC
-        LIMIT 1
-        `,
-        [patientId]
-      );
-      const lastPayment = paymentRows[0] || null;
-
-      conn.release();
-
-      return res.json({
-        patient,
-        lastService,
-        nextAppointment,
-        lastPayment,
-      });
-    } catch (err) {
-      conn.release();
-      console.error('Error en /api/pacientes/:patientId/summary:', err);
-      return res
-        .status(500)
-        .json({ error: 'Error interno generando resumen de paciente' });
+    if (!Number.isFinite(patientId) || patientId <= 0) {
+      return res.status(400).json({ error: 'patientId inválido' })
     }
-  } catch (err) {
-    console.error('Error de conexión a la BD:', err);
-    return res
-      .status(500)
-      .json({ error: 'No se pudo conectar a la base de datos' });
-  }
-});
+    if (!Number.isFinite(treatmentId) || treatmentId <= 0) {
+      return res.status(400).json({ error: 'treatmentId inválido' })
+    }
+
+    const hasCost = req.body?.total_cost !== undefined
+    const hasQty = req.body?.quantity !== undefined
+
+    if (!hasCost && !hasQty) {
+      return res.status(400).json({ error: 'Envía total_cost y/o quantity' })
+    }
+
+    const setParts = []
+    const values = []
+
+    if (hasCost) {
+      const costNum = Number(req.body.total_cost)
+      if (!Number.isFinite(costNum) || costNum < 0) {
+        return res.status(400).json({ error: 'total_cost inválido' })
+      }
+      setParts.push('total_cost = ?')
+      values.push(costNum)
+    }
+
+    if (hasQty) {
+      const qNum = Number(req.body.quantity)
+      const qty = Number.isFinite(qNum) ? Math.trunc(qNum) : NaN
+      if (!Number.isFinite(qty) || qty < 1) {
+        return res.status(400).json({ error: 'quantity inválida (entero >= 1)' })
+      }
+      setParts.push('quantity = ?')
+      values.push(qty)
+    }
+
+    setParts.push('updated_at = NOW()')
+    values.push(patientId, treatmentId)
+
+    const [result] = await db.query(
+      `
+      UPDATE patient_services
+      SET ${setParts.join(', ')}
+      WHERE patient_id = ? AND id = ?
+      `,
+      values
+    )
+
+    if (result.affectedRows === 0) {
+      return res
+        .status(404)
+        .json({ error: 'Tratamiento no encontrado para ese paciente' })
+    }
+
+    res.json({ message: 'Tratamiento actualizado.' })
+  })
+)
 
 // Obtener pacientes recientes por created_at (ej. últimos N días)
 router.get(
