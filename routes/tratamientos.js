@@ -237,6 +237,37 @@ async function buildTreatmentsQuery() {
   return { baseSelect, hasQty, hasTeeth }
 }
 
+const parseJsonArray = (raw) => {
+  if (raw === undefined || raw === null || raw === '') return undefined
+  if (Array.isArray(raw)) return raw
+  try {
+    const v = JSON.parse(raw)
+    return Array.isArray(v) ? v : undefined
+  } catch {
+    return undefined
+  }
+}
+
+const isQuillHtmlMeaningful = (html) => {
+  const s = String(html ?? '').trim()
+  if (!s) return false
+  // quill vacío típico: "<p><br></p>"
+  const textOnly = s
+    .replace(/<style[\s\S]*?<\/style>/gi, '')
+    .replace(/<script[\s\S]*?<\/script>/gi, '')
+    .replace(/<\/?[^>]+(>|$)/g, '')
+    .replace(/&nbsp;/g, ' ')
+    .trim()
+  return textOnly.length > 0
+}
+
+const buildCommentS3Key = ({ patientId, treatmentId, commentId, originalname }) => {
+  const ts = Date.now()
+  const clean = safeFileName(originalname)
+  return `clinical_histories/patient_${patientId}/treatment_${treatmentId}/comments/comment_${commentId}/${ts}_${clean}`
+}
+
+
 /**
  * GET /api/pacientes/:patientId/tratamientos
  */
@@ -1104,6 +1135,261 @@ router.delete(
     res.json({ message: "Documento eliminado exitosamente." })
   })
 )
+
+router.get(
+  '/:treatmentId/comentarios',
+  asyncHandler(async (req, res) => {
+    const patientId = toNumber(req.params.patientId)
+    const treatmentId = toNumber(req.params.treatmentId)
+    if (!patientId) return res.status(400).json({ error: 'patientId inválido' })
+    if (!treatmentId) return res.status(400).json({ error: 'treatmentId inválido' })
+
+    const commentsTableExists = await hasTable('patient_treatment_comments')
+    const mediaTableExists = await hasTable('patient_treatment_comment_media')
+    if (!commentsTableExists) return res.json([])
+
+    // valida pertenencia
+    const [[own]] = await db.query(
+      `SELECT id FROM patient_services WHERE id = ? AND patient_id = ? LIMIT 1`,
+      [treatmentId, patientId]
+    )
+    if (!own) return res.status(404).json({ error: 'Tratamiento no encontrado.' })
+
+    // comentarios + media como subquery (más fácil)
+    const [rows] = await db.query(
+      `
+      SELECT
+        c.id,
+        c.patient_id,
+        c.patient_service_group_id AS group_id,
+        c.patient_service_id AS treatment_id,
+        COALESCE(c.teeth_ids, JSON_ARRAY()) AS teeth_ids,
+        c.comment_html,
+        c.created_by,
+        c.created_at,
+        c.updated_at,
+        ${
+          mediaTableExists
+            ? `(SELECT COALESCE(
+                  JSON_ARRAYAGG(
+                    JSON_OBJECT(
+                      'id', m.id,
+                      'file_url', m.file_url,
+                      'mime_type', m.mime_type,
+                      'original_name', m.original_name,
+                      'size_bytes', m.size_bytes,
+                      'created_at', m.created_at
+                    )
+                  ),
+                  JSON_ARRAY()
+                )
+                FROM patient_treatment_comment_media m
+                WHERE m.comment_id = c.id
+              ) AS media`
+            : `JSON_ARRAY() AS media`
+        }
+      FROM patient_treatment_comments c
+      WHERE c.patient_id = ? AND c.patient_service_id = ?
+      ORDER BY c.created_at DESC, c.id DESC
+      `,
+      [patientId, treatmentId]
+    )
+
+    res.json(rows)
+  })
+)
+
+router.post(
+  '/:treatmentId/comentarios',
+  upload.array('file', 10),
+  asyncHandler(async (req, res) => {
+    const patientId = toNumber(req.params.patientId)
+    const treatmentId = toNumber(req.params.treatmentId)
+    if (!patientId) return res.status(400).json({ error: 'patientId inválido' })
+    if (!treatmentId) return res.status(400).json({ error: 'treatmentId inválido' })
+
+    const commentsTableExists = await hasTable('patient_treatment_comments')
+    const mediaTableExists = await hasTable('patient_treatment_comment_media')
+    if (!commentsTableExists) {
+      return res.status(500).json({ error: "Table 'patient_treatment_comments' doesn't exist" })
+    }
+
+    // valida pertenencia + saca group_id real del treatment
+    const [[own]] = await db.query(
+      `SELECT id, group_id FROM patient_services WHERE id = ? AND patient_id = ? LIMIT 1`,
+      [treatmentId, patientId]
+    )
+    if (!own) return res.status(404).json({ error: 'Tratamiento no encontrado.' })
+
+    const groupId = own?.group_id ? Number(own.group_id) : null
+
+    const commentHtml =
+      req.body?.comment_html ?? req.body?.comment ?? req.body?.html ?? null
+
+    const teethRaw = req.body?.teeth_ids ?? req.body?.teeth ?? undefined
+    const teethParsed = parseJsonArray(teethRaw)
+    const teethCodes = normalizeToothCodes(teethParsed) // reutiliza tu helper
+
+    const hasText = isQuillHtmlMeaningful(commentHtml)
+    const hasFiles = Array.isArray(req.files) && req.files.length > 0
+
+    if (!hasText && !hasFiles) {
+      return res.status(400).json({ error: 'El comentario está vacío (sin texto ni evidencias).' })
+    }
+
+    const conn = await db.getConnection()
+    try {
+      await conn.beginTransaction()
+
+      // 1) insertar comentario
+      const [ins] = await conn.query(
+        `
+        INSERT INTO patient_treatment_comments
+          (patient_id, patient_service_group_id, patient_service_id, comment_html, teeth_ids, created_by, created_at, updated_at)
+        VALUES
+          (?, ?, ?, ?, ?, ?, NOW(), NOW())
+        `,
+        [
+          patientId,
+          groupId,
+          treatmentId,
+          commentHtml || null,
+          teethCodes?.length ? JSON.stringify(teethCodes) : JSON.stringify([]),
+          req.user?.id ?? null,
+        ]
+      )
+
+      const commentId = ins.insertId
+
+      // 2) subir archivos y guardar media
+      if (hasFiles) {
+        if (!mediaTableExists) {
+          throw new Error("Table 'patient_treatment_comment_media' doesn't exist")
+        }
+
+        for (const file of req.files) {
+          const key = buildCommentS3Key({
+            patientId,
+            treatmentId,
+            commentId,
+            originalname: file.originalname,
+          })
+          const url = await uploadFileToS3({ key, file })
+
+          await conn.query(
+            `
+            INSERT INTO patient_treatment_comment_media
+              (comment_id, file_url, mime_type, original_name, size_bytes, created_at)
+            VALUES
+              (?, ?, ?, ?, ?, NOW())
+            `,
+            [
+              commentId,
+              url,
+              file.mimetype || null,
+              file.originalname || null,
+              Number(file.size || 0) || null,
+            ]
+          )
+        }
+      }
+
+      await conn.commit()
+
+      // 3) responder comentario creado con media
+      const [created] = await db.query(
+        `
+        SELECT
+          c.id,
+          c.patient_id,
+          c.patient_service_group_id AS group_id,
+          c.patient_service_id AS treatment_id,
+          COALESCE(c.teeth_ids, JSON_ARRAY()) AS teeth_ids,
+          c.comment_html,
+          c.created_by,
+          c.created_at,
+          c.updated_at,
+          (SELECT COALESCE(
+              JSON_ARRAYAGG(
+                JSON_OBJECT(
+                  'id', m.id,
+                  'file_url', m.file_url,
+                  'mime_type', m.mime_type,
+                  'original_name', m.original_name,
+                  'size_bytes', m.size_bytes,
+                  'created_at', m.created_at
+                )
+              ),
+              JSON_ARRAY()
+            )
+            FROM patient_treatment_comment_media m
+            WHERE m.comment_id = c.id
+          ) AS media
+        FROM patient_treatment_comments c
+        WHERE c.id = ?
+        LIMIT 1
+        `,
+        [commentId]
+      )
+
+      res.status(201).json(created?.[0] ?? null)
+    } catch (e) {
+      await conn.rollback()
+      throw e
+    } finally {
+      conn.release()
+    }
+  })
+)
+
+router.delete(
+  '/:treatmentId/comentarios/:commentId',
+  asyncHandler(async (req, res) => {
+    const patientId = toNumber(req.params.patientId)
+    const treatmentId = toNumber(req.params.treatmentId)
+    const commentId = toNumber(req.params.commentId)
+
+    if (!patientId) return res.status(400).json({ error: 'patientId inválido' })
+    if (!treatmentId) return res.status(400).json({ error: 'treatmentId inválido' })
+    if (!commentId) return res.status(400).json({ error: 'commentId inválido' })
+
+    const commentsTableExists = await hasTable('patient_treatment_comments')
+    const mediaTableExists = await hasTable('patient_treatment_comment_media')
+    if (!commentsTableExists) return res.status(404).json({ error: 'Comentario no encontrado.' })
+
+    // valida pertenencia (paciente + treatment)
+    const [[own]] = await db.query(
+      `
+      SELECT id
+      FROM patient_treatment_comments
+      WHERE id = ? AND patient_id = ? AND patient_service_id = ?
+      LIMIT 1
+      `,
+      [commentId, patientId, treatmentId]
+    )
+    if (!own) return res.status(404).json({ error: 'Comentario no encontrado.' })
+
+    // borra archivos S3 primero
+    if (mediaTableExists) {
+      const [media] = await db.query(
+        `SELECT file_url FROM patient_treatment_comment_media WHERE comment_id = ?`,
+        [commentId]
+      )
+      for (const m of media) {
+        const key = extractS3KeyFromUrl(m.file_url)
+        if (key) {
+          await s3.deleteObject({ Bucket: S3_BUCKET, Key: key }).promise()
+        }
+      }
+    }
+
+    // borra comment (media cae por FK cascade)
+    await db.query(`DELETE FROM patient_treatment_comments WHERE id = ?`, [commentId])
+
+    res.json({ ok: true })
+  })
+)
+
 
 
 module.exports = router

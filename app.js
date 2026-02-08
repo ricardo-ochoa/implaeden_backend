@@ -27,6 +27,7 @@ const tratamientosRoutes = require("./routes/tratamientos");
 const treatmentEvidencesRoutes = require("./routes/treatmentEvidences");
 const patientSummaryTtsRoutes = require("./routes/patientSummaryTts");
 const patientTreatmentEventsRoutes = require("./routes/patientTreatmentEvents");
+const teethRouter = require('./routes/teeth')
 
 const { authenticateJwt } = require("./middleware/auth");
 
@@ -108,7 +109,7 @@ app.use("/api/ai", authenticateJwt, aiRoutes);
 app.use("/api/clinical-histories", authenticateJwt, clinicalHistoryRoutes);
 app.use("/api/servicios", authenticateJwt, servicioRoutes);
 app.use("/api/email", authenticateJwt, emailRoutes);
-
+app.use('/api/teeth', teethRouter)
 /**
  * =========================
  * PROTECTED ROUTES (NESTED)
