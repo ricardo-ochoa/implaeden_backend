@@ -431,22 +431,52 @@ router.post(
 
 /**
  * PATCH /api/pacientes/:patientId/tratamientos/:treatmentId
- * (incluye teeth_ids opcional)
+ * - Actualiza campos de patient_services
+ * - Actualiza teeth_ids (tabla patient_service_teeth) si existe
+ * - ✅ group_start_date y service_date quedan SIEMPRE sincronizadas en todo el grupo
+ * - Actualiza group_title (title) si viene
+ * - Loggea evento de cambio de costo
  */
 router.patch(
   "/:treatmentId",
   asyncHandler(async (req, res) => {
     const patientId = toNumber(req.params.patientId)
     const treatmentId = toNumber(req.params.treatmentId)
+
     if (!patientId) return res.status(400).json({ error: "patientId inválido" })
     if (!treatmentId) return res.status(400).json({ error: "treatmentId inválido" })
 
-    const { total_cost, notes, service_date, service_id, status, quantity, teeth_ids } = req.body
+    const {
+      total_cost,
+      notes,
+      service_date,
+      service_id,
+      status,
+      quantity,
+      teeth_ids,
+
+      // ✅ grupo
+      group_start_date,
+      group_title,
+      title, // alias del front
+    } = req.body
 
     const hasQty = await hasColumn("patient_services", "quantity")
     const teethTableExists = await hasTable("patient_service_teeth")
+    const groupsTableExists = await hasTable("patient_service_groups")
+
+    // ✅ si llega cualquiera, sincronizamos
+    const dateToSync =
+      group_start_date !== undefined ? group_start_date : service_date !== undefined ? service_date : undefined
+
+    const validateDate = (d) => {
+      if (!d) return false
+      const dt = new Date(d)
+      return !Number.isNaN(dt.getTime())
+    }
 
     const conn = await db.getConnection()
+
     let oldCost = null
     let newCost = null
     let groupIdForEvent = null
@@ -454,10 +484,18 @@ router.patch(
     try {
       await conn.beginTransaction()
 
+      // 🔒 lock del treatment
       const [[prev]] = await conn.query(
-        `SELECT total_cost, group_id FROM patient_services WHERE id = ? AND patient_id = ? LIMIT 1 FOR UPDATE`,
+        `
+        SELECT total_cost, group_id
+        FROM patient_services
+        WHERE id = ? AND patient_id = ?
+        LIMIT 1
+        FOR UPDATE
+        `,
         [treatmentId, patientId]
       )
+
       if (!prev) {
         await conn.rollback()
         return res.status(404).json({ error: "Tratamiento no encontrado." })
@@ -465,15 +503,19 @@ router.patch(
 
       groupIdForEvent = prev?.group_id ? Number(prev.group_id) : null
 
+      // ✅ valida costo si viene
       if (total_cost !== undefined) {
         oldCost = Number(prev.total_cost || 0)
         newCost = total_cost == null || total_cost === "" ? 0 : toNumber(total_cost)
-        if (newCost == null) {
+        if (newCost == null || newCost < 0) {
           await conn.rollback()
           return res.status(400).json({ error: "total_cost no es válido" })
         }
       }
 
+      // ==========================
+      // 1) UPDATE patient_services (campos normales)
+      // ==========================
       const sets = []
       const values = []
 
@@ -497,13 +539,15 @@ router.patch(
         values.push(notes || null)
       }
 
-      if (service_date !== undefined) {
-        if (!service_date) {
+      // ✅ SOLO actualiza service_date directo si NO pertenece a grupo o si NO estamos sincronizando
+      // (si pertenece a grupo y viene dateToSync, se sincroniza en bloque más abajo)
+      if (dateToSync !== undefined && !groupIdForEvent) {
+        if (!validateDate(dateToSync)) {
           await conn.rollback()
-          return res.status(400).json({ error: "service_date no es válido" })
+          return res.status(400).json({ error: "service_date/group_start_date inválido" })
         }
         sets.push("service_date = ?")
-        values.push(service_date)
+        values.push(dateToSync)
       }
 
       if (service_id !== undefined) {
@@ -513,7 +557,10 @@ router.patch(
           return res.status(400).json({ error: "service_id no es válido" })
         }
 
-        const [svc] = await conn.query("SELECT id FROM services WHERE id = ? LIMIT 1", [sid])
+        const [svc] = await conn.query(
+          "SELECT id FROM services WHERE id = ? LIMIT 1",
+          [sid]
+        )
         if (!svc.length) {
           await conn.rollback()
           return res.status(400).json({ error: "service_id no existe" })
@@ -523,15 +570,22 @@ router.patch(
         values.push(sid)
       }
 
+      // dentro del PATCH /:treatmentId
       if (status !== undefined) {
-        const normalized = normalizeStatus(status)
-        if (!normalized || !VALID_STATUSES.includes(normalized)) {
-          await conn.rollback()
-          return res.status(400).json({ error: "Estado no válido.", valid: VALID_STATUSES })
+        // ✅ si viene vacío, NO actualices status
+        if (String(status).trim() === '') {
+          // no haces nada
+        } else {
+          const normalized = normalizeStatus(status)
+          if (!normalized || !VALID_STATUSES.includes(normalized)) {
+            await conn.rollback()
+            return res.status(400).json({ error: "Estado no válido.", valid: VALID_STATUSES })
+          }
+          sets.push("status = ?")
+          values.push(normalized)
         }
-        sets.push("status = ?")
-        values.push(normalized)
       }
+
 
       if (sets.length > 0) {
         sets.push("updated_at = NOW()")
@@ -547,9 +601,81 @@ router.patch(
         )
       }
 
+      // ==========================
+      // 2) UPDATE teeth (si existe)
+      // ==========================
       if (teeth_ids !== undefined && teethTableExists) {
         const codes = normalizeToothCodes(teeth_ids)
         await replaceServiceTeeth(conn, treatmentId, codes)
+      }
+
+      // ==========================
+      // 3) SYNC fechas del grupo (si aplica)
+      // ==========================
+      if (groupIdForEvent && dateToSync !== undefined) {
+        if (!validateDate(dateToSync)) {
+          await conn.rollback()
+          return res.status(400).json({ error: "service_date/group_start_date inválido" })
+        }
+
+        // lock group
+        if (groupsTableExists) {
+          const [[g]] = await conn.query(
+            `
+            SELECT id
+            FROM patient_service_groups
+            WHERE id = ? AND patient_id = ?
+            LIMIT 1
+            FOR UPDATE
+            `,
+            [groupIdForEvent, patientId]
+          )
+          if (!g) {
+            await conn.rollback()
+            return res.status(404).json({ error: "Grupo no encontrado para este paciente." })
+          }
+
+          // ✅ update group.start_date
+          await conn.query(
+            `
+            UPDATE patient_service_groups
+            SET start_date = ?, updated_at = NOW()
+            WHERE id = ? AND patient_id = ?
+            `,
+            [dateToSync, groupIdForEvent, patientId]
+          )
+        }
+
+        // ✅ update TODOS los treatments del grupo con la misma service_date
+        await conn.query(
+          `
+          UPDATE patient_services
+          SET service_date = ?, updated_at = NOW()
+          WHERE patient_id = ? AND group_id = ?
+          `,
+          [dateToSync, patientId, groupIdForEvent]
+        )
+      }
+
+      // ==========================
+      // 4) UPDATE title del grupo (si aplica)
+      // ==========================
+      const nextGroupTitle = group_title ?? title
+      if (groupIdForEvent && nextGroupTitle !== undefined && groupsTableExists) {
+        const t = String(nextGroupTitle || "").trim()
+        if (!t) {
+          await conn.rollback()
+          return res.status(400).json({ error: "group_title inválido" })
+        }
+
+        await conn.query(
+          `
+          UPDATE patient_service_groups
+          SET title = ?, updated_at = NOW()
+          WHERE id = ? AND patient_id = ?
+          `,
+          [t, groupIdForEvent, patientId]
+        )
       }
 
       await conn.commit()
@@ -560,7 +686,15 @@ router.patch(
       conn.release()
     }
 
-    if (total_cost !== undefined && oldCost !== null && newCost !== null && oldCost !== newCost) {
+    // ==========================
+    // 5) Log event (costo)
+    // ==========================
+    if (
+      total_cost !== undefined &&
+      oldCost !== null &&
+      newCost !== null &&
+      oldCost !== newCost
+    ) {
       await logPatientEvent({
         patientId,
         patientServiceId: treatmentId,
@@ -572,12 +706,19 @@ router.patch(
       })
     }
 
-    res.json({ message: "Tratamiento actualizado exitosamente." })
+    res.json({
+      message: "Tratamiento actualizado exitosamente.",
+      group_id: groupIdForEvent,
+      synced_date: dateToSync !== undefined && groupIdForEvent ? dateToSync : null,
+    })
   })
 )
 
+
 /**
  * PUT /api/pacientes/:patientId/tratamientos/:treatmentId/status
+ * ✅ actualiza patient_services.status
+ * ✅ si pertenece a grupo, recalcula y actualiza patient_service_groups.status
  */
 router.put(
   "/:treatmentId/status",
@@ -595,20 +736,84 @@ router.put(
       return res.status(400).json({ error: "Estado no válido.", valid: VALID_STATUSES })
     }
 
-    const [result] = await db.query(
-      `UPDATE patient_services
-       SET status = ?, updated_at = NOW()
-       WHERE id = ? AND patient_id = ?`,
-      [normalized, treatmentId, patientId]
-    )
+    const groupsTableExists = await hasTable("patient_service_groups")
 
-    if (result.affectedRows === 0) {
-      return res.status(404).json({ error: "Tratamiento no encontrado para este paciente." })
+    const conn = await db.getConnection()
+    try {
+      await conn.beginTransaction()
+
+      // 🔒 lock del treatment + obten group_id
+      const [[row]] = await conn.query(
+        `
+        SELECT id, group_id
+        FROM patient_services
+        WHERE id = ? AND patient_id = ?
+        LIMIT 1
+        FOR UPDATE
+        `,
+        [treatmentId, patientId]
+      )
+
+      if (!row) {
+        await conn.rollback()
+        return res.status(404).json({ error: "Tratamiento no encontrado para este paciente." })
+      }
+
+      await conn.query(
+        `
+        UPDATE patient_services
+        SET status = ?, updated_at = NOW()
+        WHERE id = ? AND patient_id = ?
+        `,
+        [normalized, treatmentId, patientId]
+      )
+
+      const groupId = row?.group_id ? Number(row.group_id) : null
+      let groupStatus = null
+
+      // ✅ si pertenece a grupo, recalcula status del grupo
+      if (groupId && groupsTableExists) {
+        const [stRows] = await conn.query(
+          `
+          SELECT status
+          FROM patient_services
+          WHERE patient_id = ? AND group_id = ?
+          `,
+          [patientId, groupId]
+        )
+
+        const statuses = stRows.map((r) => normalizeStatus(r.status))
+        const allDone = statuses.length > 0 && statuses.every((s) => s === "Terminado")
+        const anyInProgress = statuses.some((s) => s === "En proceso")
+        groupStatus = allDone ? "Terminado" : anyInProgress ? "En proceso" : "Por Iniciar"
+
+        await conn.query(
+          `
+          UPDATE patient_service_groups
+          SET status = ?, updated_at = NOW()
+          WHERE id = ? AND patient_id = ?
+          `,
+          [groupStatus, groupId, patientId]
+        )
+      }
+
+      await conn.commit()
+
+      res.json({
+        message: "Estado actualizado exitosamente.",
+        status: normalized,
+        group_id: groupId,
+        group_status: groupStatus,
+      })
+    } catch (e) {
+      await conn.rollback()
+      throw e
+    } finally {
+      conn.release()
     }
-
-    res.json({ message: "Estado actualizado exitosamente." })
   })
 )
+
 
 /**
  * PUT /api/pacientes/:patientId/tratamientos/:treatmentId/costo

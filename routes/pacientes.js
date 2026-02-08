@@ -223,69 +223,69 @@ router.get(
   })
 )
 
-router.patch(
-  '/:patientId/tratamientos/:treatmentId',
-  asyncHandler(async (req, res) => {
-    const patientId = Number(req.params.patientId)
-    const treatmentId = Number(req.params.treatmentId)
+// router.patch(
+//   '/:patientId/tratamientos/:treatmentId',
+//   asyncHandler(async (req, res) => {
+//     const patientId = Number(req.params.patientId)
+//     const treatmentId = Number(req.params.treatmentId)
 
-    if (!Number.isFinite(patientId) || patientId <= 0) {
-      return res.status(400).json({ error: 'patientId inválido' })
-    }
-    if (!Number.isFinite(treatmentId) || treatmentId <= 0) {
-      return res.status(400).json({ error: 'treatmentId inválido' })
-    }
+//     if (!Number.isFinite(patientId) || patientId <= 0) {
+//       return res.status(400).json({ error: 'patientId inválido' })
+//     }
+//     if (!Number.isFinite(treatmentId) || treatmentId <= 0) {
+//       return res.status(400).json({ error: 'treatmentId inválido' })
+//     }
 
-    const hasCost = req.body?.total_cost !== undefined
-    const hasQty = req.body?.quantity !== undefined
+//     const hasCost = req.body?.total_cost !== undefined
+//     const hasQty = req.body?.quantity !== undefined
 
-    if (!hasCost && !hasQty) {
-      return res.status(400).json({ error: 'Envía total_cost y/o quantity' })
-    }
+//     if (!hasCost && !hasQty) {
+//       return res.status(400).json({ error: 'Envía total_cost y/o quantity' })
+//     }
 
-    const setParts = []
-    const values = []
+//     const setParts = []
+//     const values = []
 
-    if (hasCost) {
-      const costNum = Number(req.body.total_cost)
-      if (!Number.isFinite(costNum) || costNum < 0) {
-        return res.status(400).json({ error: 'total_cost inválido' })
-      }
-      setParts.push('total_cost = ?')
-      values.push(costNum)
-    }
+//     if (hasCost) {
+//       const costNum = Number(req.body.total_cost)
+//       if (!Number.isFinite(costNum) || costNum < 0) {
+//         return res.status(400).json({ error: 'total_cost inválido' })
+//       }
+//       setParts.push('total_cost = ?')
+//       values.push(costNum)
+//     }
 
-    if (hasQty) {
-      const qNum = Number(req.body.quantity)
-      const qty = Number.isFinite(qNum) ? Math.trunc(qNum) : NaN
-      if (!Number.isFinite(qty) || qty < 1) {
-        return res.status(400).json({ error: 'quantity inválida (entero >= 1)' })
-      }
-      setParts.push('quantity = ?')
-      values.push(qty)
-    }
+//     if (hasQty) {
+//       const qNum = Number(req.body.quantity)
+//       const qty = Number.isFinite(qNum) ? Math.trunc(qNum) : NaN
+//       if (!Number.isFinite(qty) || qty < 1) {
+//         return res.status(400).json({ error: 'quantity inválida (entero >= 1)' })
+//       }
+//       setParts.push('quantity = ?')
+//       values.push(qty)
+//     }
 
-    setParts.push('updated_at = NOW()')
-    values.push(patientId, treatmentId)
+//     setParts.push('updated_at = NOW()')
+//     values.push(patientId, treatmentId)
 
-    const [result] = await db.query(
-      `
-      UPDATE patient_services
-      SET ${setParts.join(', ')}
-      WHERE patient_id = ? AND id = ?
-      `,
-      values
-    )
+//     const [result] = await db.query(
+//       `
+//       UPDATE patient_services
+//       SET ${setParts.join(', ')}
+//       WHERE patient_id = ? AND id = ?
+//       `,
+//       values
+//     )
 
-    if (result.affectedRows === 0) {
-      return res
-        .status(404)
-        .json({ error: 'Tratamiento no encontrado para ese paciente' })
-    }
+//     if (result.affectedRows === 0) {
+//       return res
+//         .status(404)
+//         .json({ error: 'Tratamiento no encontrado para ese paciente' })
+//     }
 
-    res.json({ message: 'Tratamiento actualizado.' })
-  })
-)
+//     res.json({ message: 'Tratamiento actualizado.' })
+//   })
+// )
 
 // Obtener pacientes recientes por created_at (ej. últimos N días)
 router.get(
