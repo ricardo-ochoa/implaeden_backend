@@ -16,7 +16,23 @@ AWS.config.update({
 })
 
 const s3 = new AWS.S3()
+
 const upload = multer({ storage: multer.memoryStorage() })
+
+const commentUpload = upload.fields([
+  { name: 'file', maxCount: 10 },
+  { name: 'files', maxCount: 10 },
+  { name: 'media', maxCount: 10 },
+  { name: 'evidence', maxCount: 10 },
+  { name: 'evidences', maxCount: 10 },
+  { name: 'file[]', maxCount: 10 },
+])
+
+const collectFiles = (req) => {
+  // con upload.fields -> req.files es objeto { file:[], files:[]... }
+  const obj = req.files || {}
+  return Object.values(obj).flat()
+}
 
 const S3_BUCKET = process.env.AWS_S3_BUCKET || "implaeden"
 
@@ -1431,6 +1447,276 @@ router.delete(
     res.json({ ok: true })
   })
 )
+
+router.patch(
+  '/:treatmentId/comentarios/:commentId',
+  commentUpload,
+  asyncHandler(async (req, res) => {
+    const files = collectFiles(req)
+    const hasNewFiles = Array.isArray(files) && files.length > 0
+
+    const patientId = toNumber(req.params.patientId)
+    const treatmentId = toNumber(req.params.treatmentId)
+    const commentId = toNumber(req.params.commentId)
+
+    if (!patientId) return res.status(400).json({ error: 'patientId inválido' })
+    if (!treatmentId) return res.status(400).json({ error: 'treatmentId inválido' })
+    if (!commentId) return res.status(400).json({ error: 'commentId inválido' })
+
+    const commentsTableExists = await hasTable('patient_treatment_comments')
+    const mediaTableExists = await hasTable('patient_treatment_comment_media')
+    if (!commentsTableExists) return res.status(404).json({ error: 'Comentario no encontrado.' })
+
+    // valida pertenencia del tratamiento al paciente
+    const [[ownTreatment]] = await db.query(
+      `SELECT id FROM patient_services WHERE id = ? AND patient_id = ? LIMIT 1`,
+      [treatmentId, patientId]
+    )
+    if (!ownTreatment) return res.status(404).json({ error: 'Tratamiento no encontrado.' })
+
+    // inputs
+    const rawHtml =
+      req.body?.comment_html ?? req.body?.comment ?? req.body?.html ?? undefined
+
+    const rawTeeth = req.body?.teeth_ids ?? req.body?.teeth ?? undefined
+
+    const rawRemove = req.body?.remove_media_ids ?? req.body?.removeMediaIds ?? undefined
+
+    const teethParsed = rawTeeth !== undefined ? parseJsonArray(rawTeeth) : undefined
+    const teethCodes =
+      teethParsed !== undefined ? normalizeToothCodes(teethParsed) : undefined
+
+    const removeParsed = rawRemove !== undefined ? parseJsonArray(rawRemove) : undefined
+    const removeIds = Array.isArray(removeParsed)
+      ? removeParsed.map(toInt).filter((n) => n != null)
+      : undefined
+
+    const wantsRemove = Array.isArray(removeIds) && removeIds.length > 0
+    const wantsHtmlUpdate = rawHtml !== undefined
+    const wantsTeethUpdate = rawTeeth !== undefined
+
+    // si quieren subir/borrar media pero la tabla no existe
+    if ((hasNewFiles || wantsRemove) && !mediaTableExists) {
+      return res.status(500).json({
+        error: "Table 'patient_treatment_comment_media' doesn't exist",
+      })
+    }
+
+    const conn = await db.getConnection()
+    let s3KeysToDelete = []
+
+    try {
+      await conn.beginTransaction()
+
+      // ✅ lock del comentario + valida pertenencia
+      const [[prev]] = await conn.query(
+        `
+        SELECT id, comment_html, COALESCE(teeth_ids, JSON_ARRAY()) AS teeth_ids
+        FROM patient_treatment_comments
+        WHERE id = ? AND patient_id = ? AND patient_service_id = ?
+        LIMIT 1
+        FOR UPDATE
+        `,
+        [commentId, patientId, treatmentId]
+      )
+
+      if (!prev) {
+        await conn.rollback()
+        return res.status(404).json({ error: 'Comentario no encontrado.' })
+      }
+
+      // 1) eliminar media seleccionada (DB) + preparar borrado S3
+      if (wantsRemove) {
+        // trae urls que sí pertenezcan al comment
+        const placeholders = removeIds.map(() => '?').join(',')
+        const [rows] = await conn.query(
+          `
+          SELECT id, file_url
+          FROM patient_treatment_comment_media
+          WHERE comment_id = ?
+            AND id IN (${placeholders})
+          `,
+          [commentId, ...removeIds]
+        )
+
+        s3KeysToDelete = (rows || [])
+          .map((r) => extractS3KeyFromUrl(r.file_url))
+          .filter(Boolean)
+
+        // borra solo los que existan
+        if (rows.length) {
+          await conn.query(
+            `
+            DELETE FROM patient_treatment_comment_media
+            WHERE comment_id = ?
+              AND id IN (${placeholders})
+            `,
+            [commentId, ...removeIds]
+          )
+        }
+      }
+
+      // 2) subir nuevos archivos + guardar media
+      if (hasNewFiles) {
+      for (const file of files) {
+          const key = buildCommentS3Key({
+            patientId,
+            treatmentId,
+            commentId,
+            originalname: file.originalname,
+          })
+          const url = await uploadFileToS3({ key, file })
+
+          await conn.query(
+            `
+            INSERT INTO patient_treatment_comment_media
+              (comment_id, file_url, mime_type, original_name, size_bytes, created_at)
+            VALUES
+              (?, ?, ?, ?, ?, NOW())
+            `,
+            [
+              commentId,
+              url,
+              file.mimetype || null,
+              file.originalname || null,
+              Number(file.size || 0) || null,
+            ]
+          )
+        }
+      }
+
+      // 3) preparar update de comment (html + teeth)
+      const sets = []
+      const values = []
+
+      if (wantsHtmlUpdate) {
+        // si viene vacío tipo "<p><br></p>" lo guardamos como null
+        const meaningful = isQuillHtmlMeaningful(rawHtml)
+        sets.push('comment_html = ?')
+        values.push(meaningful ? String(rawHtml) : null)
+      }
+
+      if (wantsTeethUpdate) {
+        sets.push('teeth_ids = ?')
+        values.push(JSON.stringify(teethCodes?.length ? teethCodes : []))
+      }
+
+      const touched =
+        wantsHtmlUpdate || wantsTeethUpdate || hasNewFiles || wantsRemove
+
+      if (touched) {
+        sets.push('updated_at = NOW()')
+      }
+
+      if (sets.length) {
+        values.push(commentId, patientId, treatmentId)
+        await conn.query(
+          `
+          UPDATE patient_treatment_comments
+          SET ${sets.join(', ')}
+          WHERE id = ? AND patient_id = ? AND patient_service_id = ?
+          `,
+          values
+        )
+      }
+
+      // 4) validación final: no permitir comentario “vacío” (sin texto y sin media)
+      //    (solo si tocaron algo)
+      if (touched) {
+        // html final:
+        const [[finalRow]] = await conn.query(
+          `
+          SELECT comment_html
+          FROM patient_treatment_comments
+          WHERE id = ? AND patient_id = ? AND patient_service_id = ?
+          LIMIT 1
+          `,
+          [commentId, patientId, treatmentId]
+        )
+
+        let mediaCount = 0
+        if (mediaTableExists) {
+          const [[cnt]] = await conn.query(
+            `SELECT COUNT(*) AS c FROM patient_treatment_comment_media WHERE comment_id = ?`,
+            [commentId]
+          )
+          mediaCount = Number(cnt?.c || 0)
+        }
+
+        const hasText = isQuillHtmlMeaningful(finalRow?.comment_html)
+
+        if (!hasText && mediaCount === 0) {
+          await conn.rollback()
+          return res.status(400).json({
+            error: 'El comentario no puede quedar vacío (sin texto ni evidencias).',
+          })
+        }
+      }
+
+      await conn.commit()
+
+      // 5) responder comentario actualizado (con media)
+      const [updated] = await db.query(
+        `
+        SELECT
+          c.id,
+          c.patient_id,
+          c.patient_service_group_id AS group_id,
+          c.patient_service_id AS treatment_id,
+          COALESCE(c.teeth_ids, JSON_ARRAY()) AS teeth_ids,
+          c.comment_html,
+          c.created_by,
+          c.created_at,
+          c.updated_at,
+          ${
+            mediaTableExists
+              ? `(SELECT COALESCE(
+                    JSON_ARRAYAGG(
+                      JSON_OBJECT(
+                        'id', m.id,
+                        'file_url', m.file_url,
+                        'mime_type', m.mime_type,
+                        'original_name', m.original_name,
+                        'size_bytes', m.size_bytes,
+                        'created_at', m.created_at
+                      )
+                    ),
+                    JSON_ARRAY()
+                  )
+                  FROM patient_treatment_comment_media m
+                  WHERE m.comment_id = c.id
+                ) AS media`
+              : `JSON_ARRAY() AS media`
+          }
+        FROM patient_treatment_comments c
+        WHERE c.id = ?
+        LIMIT 1
+        `,
+        [commentId]
+      )
+
+      // ✅ cleanup S3 “best-effort”
+      if (s3KeysToDelete.length) {
+        Promise.allSettled(
+          s3KeysToDelete.map((Key) =>
+            s3.deleteObject({ Bucket: S3_BUCKET, Key }).promise()
+          )
+        ).then((results) => {
+          const failed = results.filter((r) => r.status === 'rejected')
+          if (failed.length) console.error('S3 delete failed:', failed.length)
+        })
+      }
+
+      res.json(updated?.[0] ?? null)
+    } catch (e) {
+      await conn.rollback()
+      throw e
+    } finally {
+      conn.release()
+    }
+  })
+)
+
 
 
 
