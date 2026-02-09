@@ -1357,34 +1357,76 @@ router.delete(
     const mediaTableExists = await hasTable('patient_treatment_comment_media')
     if (!commentsTableExists) return res.status(404).json({ error: 'Comentario no encontrado.' })
 
-    // valida pertenencia (paciente + treatment)
-    const [[own]] = await db.query(
-      `
-      SELECT id
-      FROM patient_treatment_comments
-      WHERE id = ? AND patient_id = ? AND patient_service_id = ?
-      LIMIT 1
-      `,
-      [commentId, patientId, treatmentId]
-    )
-    if (!own) return res.status(404).json({ error: 'Comentario no encontrado.' })
+    const conn = await db.getConnection()
+    let s3Keys = []
 
-    // borra archivos S3 primero
-    if (mediaTableExists) {
-      const [media] = await db.query(
-        `SELECT file_url FROM patient_treatment_comment_media WHERE comment_id = ?`,
-        [commentId]
+    try {
+      await conn.beginTransaction()
+
+      // ✅ valida pertenencia + lock
+      const [[own]] = await conn.query(
+        `
+        SELECT id
+        FROM patient_treatment_comments
+        WHERE id = ? AND patient_id = ? AND patient_service_id = ?
+        LIMIT 1
+        FOR UPDATE
+        `,
+        [commentId, patientId, treatmentId]
       )
-      for (const m of media) {
-        const key = extractS3KeyFromUrl(m.file_url)
-        if (key) {
-          await s3.deleteObject({ Bucket: S3_BUCKET, Key: key }).promise()
-        }
+      if (!own) {
+        await conn.rollback()
+        return res.status(404).json({ error: 'Comentario no encontrado.' })
       }
+
+      // ✅ toma llaves S3 (sin borrar aún)
+      if (mediaTableExists) {
+        const [media] = await conn.query(
+          `SELECT file_url FROM patient_treatment_comment_media WHERE comment_id = ?`,
+          [commentId]
+        )
+
+        s3Keys = (media || [])
+          .map((m) => extractS3KeyFromUrl(m.file_url))
+          .filter(Boolean)
+
+        // borra media rows (por si NO hay cascade)
+        await conn.query(
+          `DELETE FROM patient_treatment_comment_media WHERE comment_id = ?`,
+          [commentId]
+        )
+      }
+
+      // borra comentario
+      const [del] = await conn.query(
+        `DELETE FROM patient_treatment_comments WHERE id = ? AND patient_id = ? AND patient_service_id = ?`,
+        [commentId, patientId, treatmentId]
+      )
+
+      if (!del.affectedRows) {
+        await conn.rollback()
+        return res.status(404).json({ error: 'Comentario no encontrado.' })
+      }
+
+      await conn.commit()
+    } catch (e) {
+      await conn.rollback()
+      throw e
+    } finally {
+      conn.release()
     }
 
-    // borra comment (media cae por FK cascade)
-    await db.query(`DELETE FROM patient_treatment_comments WHERE id = ?`, [commentId])
+    // ✅ S3 cleanup “best-effort” (no rompe la respuesta)
+    if (s3Keys.length) {
+      Promise.allSettled(
+        s3Keys.map((Key) => s3.deleteObject({ Bucket: S3_BUCKET, Key }).promise())
+      ).then((results) => {
+        const failed = results.filter((r) => r.status === 'rejected')
+        if (failed.length) {
+          console.error('S3 delete failed:', failed.length)
+        }
+      })
+    }
 
     res.json({ ok: true })
   })
