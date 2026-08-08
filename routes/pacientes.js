@@ -2,7 +2,7 @@ const express = require('express');
 const router = express.Router();
 const db = require('../config/db');
 const pool = require('../config/db');
-const AWS = require('aws-sdk');
+const { s3, S3_BUCKET, publicUrl } = require('../config/s3'); // MinIO (dev) o AWS S3 (prod)
 const multer = require('multer');
 const { getPatientSummary } = require("../services/patientSummaryService");
 
@@ -24,14 +24,7 @@ const asyncHandler = (fn) => (req, res, next) => {
   Promise.resolve(fn(req, res, next)).catch(next);
 };
 
-// Configurar AWS S3
-AWS.config.update({
-  accessKeyId: process.env.AWS_ACCESS_KEY_ID,
-  secretAccessKey: process.env.AWS_SECRET_ACCESS_KEY,
-  region: 'us-east-2',
-});
-
-const s3 = new AWS.S3();
+// Cliente S3/MinIO: importado arriba (config/s3)
 
 // Configuración de Multer para manejar archivos
 const upload = multer({ storage: multer.memoryStorage() });
@@ -40,18 +33,16 @@ const upload = multer({ storage: multer.memoryStorage() });
 const uploadFileToS3 = async (file) => {
     const fileName = `profile_photos/${Date.now()}_${file.originalname}`;
     const params = {
-      Bucket: 'implaeden',
+      Bucket: S3_BUCKET,
       Key: fileName,
       Body: file.buffer,
       ContentType: file.mimetype,
     };
-  
+
     try {
-      const uploadResult = await s3.upload(params).promise();
-  
-      // Construir manualmente la URL base
-      const fileUrl = `https://${params.Bucket}.s3.${process.env.AWS_REGION}.amazonaws.com/${fileName}`;
-      return fileUrl;
+      await s3.upload(params).promise();
+      // URL pública (MinIO en dev, S3 en prod)
+      return publicUrl(fileName);
     } catch (error) {
       console.error('Error al subir a S3:', error);
       throw new Error('Error al subir el archivo a S3.');
@@ -62,7 +53,11 @@ const uploadFileToS3 = async (file) => {
 router.get(
   '/',
   asyncHandler(async (req, res) => {
-    const { search = '', page = 1, limit = 20 } = req.query; // Definir valores por defecto para la búsqueda y paginación
+    // page/limit llegan como texto en req.query; MySQL 8 rechaza LIMIT '20'
+    // (con comillas), así que los forzamos a enteros.
+    const search = req.query.search ?? '';
+    const page = Math.max(1, Number(req.query.page) || 1);
+    const limit = Math.max(1, Number(req.query.limit) || 20);
     const offset = (page - 1) * limit;
 
     const query = `

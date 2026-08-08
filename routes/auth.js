@@ -8,6 +8,19 @@ const router = express.Router();
 const crypto = require("crypto");
 const { authenticateJwt, authorizePermissions } = require("../middleware/auth");
 
+// Opciones de la cookie httpOnly de refresh.
+// En prod detrás del túnel, el frontend (Vercel) y el API viven en sitios
+// distintos → se requiere SameSite=None; Secure para que la cookie viaje.
+// Se controla por env (COOKIE_SAMESITE) para NO alterar dev, que sigue en 'lax'.
+const COOKIE_SAMESITE = (process.env.COOKIE_SAMESITE || 'lax').toLowerCase();
+const refreshCookieOptions = {
+  httpOnly: true,
+  sameSite: COOKIE_SAMESITE,
+  secure: process.env.NODE_ENV === 'production' || COOKIE_SAMESITE === 'none',
+  path: '/',
+  maxAge: 7 * 24 * 60 * 60 * 1000,
+};
+
 // Registro de usuario
 router.post(
   "/register",
@@ -64,13 +77,7 @@ router.post('/login', (req, res, next) => {
                    [user.id, refreshToken, new Date(Date.now() + 7*24*60*60*1000)]);
 
     // Devuelve accessToken + cookie httpOnly
-    res.cookie('refreshToken', refreshToken, {
-        httpOnly: true,
-        secure:   process.env.NODE_ENV === 'production',
-        sameSite: 'lax',
-        path:     '/',
-        maxAge:   7 * 24 * 60 * 60 * 1000,
-      })
+    res.cookie('refreshToken', refreshToken, refreshCookieOptions)
       .json({ accessToken });
   })(req, res, next);
 });
@@ -113,13 +120,7 @@ router.post('/token', async (req, res) => {
 
     // Enviar cookie + accessToken
     res
-      .cookie('refreshToken', newRefreshToken, {
-        httpOnly: true,
-        secure:   process.env.NODE_ENV === 'production',
-        sameSite: 'lax',
-        path:     '/',
-        maxAge:   7 * 24 * 60 * 60 * 1000,
-      })
+      .cookie('refreshToken', newRefreshToken, refreshCookieOptions)
       .json({ accessToken: newAccessToken });
   });
 });
@@ -131,7 +132,13 @@ router.post('/logout', async (req, res) => {
   if (refreshToken) {
     await db.query('DELETE FROM refresh_tokens WHERE token = ?', [refreshToken]);
   }
-  return res.clearCookie('refreshToken', { path: '/' }).sendStatus(204);
+  return res
+    .clearCookie('refreshToken', {
+      path: '/',
+      sameSite: refreshCookieOptions.sameSite,
+      secure: refreshCookieOptions.secure,
+    })
+    .sendStatus(204);
 });
 
 

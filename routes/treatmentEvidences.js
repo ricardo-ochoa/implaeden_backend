@@ -1,7 +1,7 @@
 // routes/treatmentEvidences.js
 const express = require('express')
 const router = express.Router({ mergeParams: true })
-const AWS = require('aws-sdk')
+const { s3, S3_BUCKET, publicUrl } = require('../config/s3') // MinIO (dev) o AWS S3 (prod)
 const multer = require('multer')
 const pool = require('../config/db')
 const { logPatientEvent } = require('../utils/logPatientEvent')
@@ -10,13 +10,7 @@ const { logPatientEvent } = require('../utils/logPatientEvent')
 const asyncHandler = (fn) => (req, res, next) =>
   Promise.resolve(fn(req, res, next)).catch(next)
 
-// 1) Configura AWS
-AWS.config.update({
-  accessKeyId: process.env.AWS_ACCESS_KEY_ID,
-  secretAccessKey: process.env.AWS_SECRET_ACCESS_KEY,
-  region: process.env.AWS_REGION,
-})
-const s3 = new AWS.S3()
+// 1) Cliente S3/MinIO: importado arriba (config/s3)
 
 // 2) Multer (in memory)
 const upload = multer({ storage: multer.memoryStorage() })
@@ -25,13 +19,13 @@ const upload = multer({ storage: multer.memoryStorage() })
 async function uploadFileToS3(file) {
   const key = `evidencias/${Date.now()}_${file.originalname}`
   const params = {
-    Bucket: process.env.S3_BUCKET_NAME,
+    Bucket: S3_BUCKET,
     Key: key,
     Body: file.buffer,
     ContentType: file.mimetype,
   }
-  const { Location } = await s3.upload(params).promise()
-  return Location
+  await s3.upload(params).promise()
+  return publicUrl(key)
 }
 
 // 4) GET: listar evidencias de un patient_service

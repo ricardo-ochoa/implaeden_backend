@@ -7,15 +7,7 @@ const { logPatientEvent } = require("../utils/logPatientEvent")
 const { normalizeToothCodes, replaceServiceTeeth } = require("../utils/teeth")
 
 const multer = require("multer")
-const AWS = require("aws-sdk")
-
-AWS.config.update({
-  accessKeyId: process.env.AWS_ACCESS_KEY_ID,
-  secretAccessKey: process.env.AWS_SECRET_ACCESS_KEY,
-  region: process.env.AWS_REGION,
-})
-
-const s3 = new AWS.S3()
+const { s3, S3_BUCKET, publicUrl } = require("../config/s3") // MinIO (dev) o AWS S3 (prod)
 
 const upload = multer({ storage: multer.memoryStorage() })
 
@@ -34,7 +26,7 @@ const collectFiles = (req) => {
   return Object.values(obj).flat()
 }
 
-const S3_BUCKET = process.env.AWS_S3_BUCKET || "implaeden"
+// S3_BUCKET proviene de config/s3 (lee S3_BUCKET_NAME)
 
 const normalizeText = (v) =>
   String(v ?? "")
@@ -86,15 +78,18 @@ const uploadFileToS3 = async ({ key, file }) => {
     Body: file.buffer,
     ContentType: file.mimetype,
   }
-  const out = await s3.upload(params).promise()
-  return out.Location
+  await s3.upload(params).promise()
+  return publicUrl(key)
 }
 
 const extractS3KeyFromUrl = (fileUrl) => {
   try {
     const u = new URL(fileUrl)
-    // pathname viene como "/clinical_histories/...."
-    return decodeURIComponent(u.pathname.replace(/^\/+/, ""))
+    // AWS virtual-host: "/clinical_histories/...."
+    // MinIO path-style:  "/<bucket>/clinical_histories/...."
+    let key = decodeURIComponent(u.pathname.replace(/^\/+/, ""))
+    if (key.startsWith(`${S3_BUCKET}/`)) key = key.slice(S3_BUCKET.length + 1)
+    return key
   } catch {
     // fallback: intenta por split
     const idx = String(fileUrl || "").indexOf("amazonaws.com/")

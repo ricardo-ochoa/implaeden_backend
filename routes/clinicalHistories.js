@@ -1,7 +1,7 @@
 const express = require('express');
 const router = express.Router();
 const db = require('../config/db');
-const AWS = require('aws-sdk');
+const { s3, S3_BUCKET, publicUrl } = require('../config/s3'); // MinIO (dev) o AWS S3 (prod)
 const multer = require('multer');
 
 // Middleware para manejar errores
@@ -9,14 +9,7 @@ const asyncHandler = (fn) => (req, res, next) => {
   Promise.resolve(fn(req, res, next)).catch(next);
 };
 
-// Configuración de AWS S3
-AWS.config.update({
-  accessKeyId: process.env.AWS_ACCESS_KEY_ID,
-  secretAccessKey: process.env.AWS_SECRET_ACCESS_KEY,
-  region: 'us-east-2',
-});
-
-const s3 = new AWS.S3();
+// Cliente S3/MinIO: importado arriba (config/s3)
 
 // Configuración de Multer para manejar archivos
 const upload = multer({ storage: multer.memoryStorage() });
@@ -25,16 +18,16 @@ const upload = multer({ storage: multer.memoryStorage() });
 const uploadFileToS3 = async (file) => {
     const fileName = `clinical_histories/${Date.now()}_${file.originalname}`;
     const params = {
-      Bucket: 'implaeden',
+      Bucket: S3_BUCKET,
       Key: fileName,
       Body: file.buffer,
       ContentType: file.mimetype,
     };
-  
+
     try {
-      const uploadResult = await s3.upload(params).promise();
-      const fileUrl = `https://${params.Bucket}.s3.${process.env.AWS_REGION}.amazonaws.com/${fileName}`;
-      console.log('Archivo subido a S3:', fileUrl);
+      await s3.upload(params).promise();
+      const fileUrl = publicUrl(fileName); // MinIO en dev, S3 en prod
+      console.log('Archivo subido a S3/MinIO:', fileUrl);
       return fileUrl;
     } catch (error) {
       console.error('Error al subir a S3:', error);
