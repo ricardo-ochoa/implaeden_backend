@@ -1,5 +1,6 @@
 // services/patientSummaryService.js
 const pool = require("../config/db");
+const gcal = require("./googleCalendar"); // citas viven en Google Calendar (la tabla `citas` es legacy)
 
 async function getPatientSummary(patientId) {
   const pid = Number(patientId);
@@ -40,27 +41,37 @@ async function getPatientSummary(patientId) {
     );
     const lastService = serviceRows[0] || null;
 
-    // 3) Última cita registrada (en el pasado) (NORMALIZADO)
-    const [appointmentRows] = await conn.query(
-      `
-      SELECT 
-        c.id,
-        c.appointment_at,
-        c.observaciones,
-        s.name  AS service_name,
-        sc.name AS service_category,
-        sc.id   AS service_category_id
-      FROM citas AS c
-      JOIN services AS s ON s.id = c.service_id
-      JOIN service_categories AS sc ON sc.id = s.category_id
-      WHERE c.patient_id = ?
-        AND c.appointment_at <= NOW()
-      ORDER BY c.appointment_at DESC
-      LIMIT 1
-      `,
-      [pid]
-    );
-    const lastAppointment = appointmentRows[0] || null;
+    // 3) Citas desde Google Calendar (la tabla `citas` quedó legacy).
+    //    Devolvemos la ÚLTIMA pasada y la PRÓXIMA futura. Si GCal no está
+    //    configurado o falla, NO rompemos el resumen (quedan en null).
+    let lastAppointment = null;
+    let nextAppointment = null;
+    try {
+      const appts = await gcal.listByPatient(pid); // vinculadas al paciente, orden asc por inicio
+      const now = Date.now();
+      // Normalizamos al shape que ya consume la UI/IA (appointment_at + service_name).
+      const toSummary = (a) =>
+        a && {
+          eventId: a.eventId,
+          appointment_at: a.start, // alias esperado por la UI y clinic-ai
+          start: a.start,
+          end: a.end,
+          service_name: a.treatment, // etiqueta mostrable (tratamiento o título del evento)
+          observaciones: a.observations,
+          status: a.status,
+          source: a.source,
+        };
+      const withStart = appts.filter((a) => a.start && !Number.isNaN(new Date(a.start).getTime()));
+      const past = withStart.filter((a) => new Date(a.start).getTime() <= now);
+      const upcoming = withStart.filter((a) => new Date(a.start).getTime() > now);
+      lastAppointment = toSummary(past[past.length - 1]); // más reciente pasada
+      nextAppointment = toSummary(upcoming[0]); // más próxima futura
+    } catch (e) {
+      // GCAL_NOT_CONFIGURED u otro error de Calendar: dejamos las citas en null.
+      if (e && e.code !== "GCAL_NOT_CONFIGURED") {
+        console.warn("patientSummary: no se pudieron leer citas de GCal:", e.message);
+      }
+    }
 
     // 4) Último pago
     const [paymentRows] = await conn.query(
@@ -83,7 +94,7 @@ async function getPatientSummary(patientId) {
     );
     const lastPayment = paymentRows[0] || null;
 
-    return { patient, lastService, lastAppointment, lastPayment };
+    return { patient, lastService, lastAppointment, nextAppointment, lastPayment };
   } finally {
     conn.release();
   }
