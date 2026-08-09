@@ -5,6 +5,7 @@ const pool = require('../config/db');
 const { s3, S3_BUCKET, publicUrl } = require('../config/s3'); // MinIO (dev) o AWS S3 (prod)
 const multer = require('multer');
 const { getPatientSummary } = require("../services/patientSummaryService");
+const reconcile = require("../services/reconcile");
 
 router.get("/:patientId/summary", async (req, res) => {
   try {
@@ -23,6 +24,20 @@ router.get("/:patientId/summary", async (req, res) => {
 const asyncHandler = (fn) => (req, res, next) => {
   Promise.resolve(fn(req, res, next)).catch(next);
 };
+
+// POST /api/pacientes/quick  -> registro rápido (solo nombre + teléfono)
+// Para pacientes que se autoagendan (Confirmafy) y no existen aún en la BD.
+router.post(
+  '/quick',
+  asyncHandler(async (req, res) => {
+    const { nombre, telefono } = req.body || {};
+    if (!nombre || !telefono) {
+      return res.status(400).json({ error: 'nombre y telefono son obligatorios.' });
+    }
+    const id = await reconcile.quickCreatePatient({ nombre, telefono });
+    res.status(201).json({ id, registro_incompleto: true, message: 'Paciente creado (registro rápido).' });
+  })
+);
 
 // Cliente S3/MinIO: importado arriba (config/s3)
 
@@ -130,39 +145,52 @@ router.put(
     upload.single('foto'),
     asyncHandler(async (req, res) => {
       const { id } = req.params;
-      const {
-        nombre,
-        apellidos,
-        telefono,
-        fecha_nacimiento,
-        email,
-        direccion,
-        eliminarFoto, // Campo para eliminar la imagen
-      } = req.body;
-      let fotoPerfilUrl = null;
-  
-      if (req.file) {
-        // Subir una nueva imagen si se proporciona
-        fotoPerfilUrl = await uploadFileToS3(req.file);
-      } else if (eliminarFoto === 'true') {
-        // Si se solicita explícitamente eliminar la imagen
-        fotoPerfilUrl = null;
-      } else {
-        // Mantener la URL existente si no se proporciona un nuevo archivo ni se solicita eliminar
-        const [existingPatient] = await db.query('SELECT foto_perfil_url FROM pacientes WHERE id = ?', [id]);
-        fotoPerfilUrl = existingPatient[0]?.foto_perfil_url || null;
-      }
-  
-      const [result] = await db.query(
-        'UPDATE pacientes SET nombre = ?, apellidos = ?, telefono = ?, fecha_nacimiento = ?, email = ?, direccion = ?, foto_perfil_url = ? WHERE id = ?',
-        [nombre, apellidos, telefono, fecha_nacimiento, email, direccion, fotoPerfilUrl, id]
+      const b = req.body || {};
+
+      // Registro actual: hacemos MERGE para permitir guardado PARCIAL
+      // (los pacientes creados con "registro rápido" no traen todos los datos).
+      const [rows] = await db.query('SELECT * FROM pacientes WHERE id = ?', [id]);
+      if (rows.length === 0) return res.status(404).json({ error: 'Paciente no encontrado' });
+      const cur = rows[0];
+
+      // Foto
+      let fotoPerfilUrl = cur.foto_perfil_url || null;
+      if (req.file) fotoPerfilUrl = await uploadFileToS3(req.file);
+      else if (b.eliminarFoto === 'true') fotoPerfilUrl = null;
+
+      // '' / 'null' -> NULL en campos opcionales; undefined -> conservar el actual
+      const clean = (v) => {
+        if (v === undefined) return undefined;
+        const s = String(v).trim();
+        return s === '' || s === 'null' || s === 'undefined' ? null : v;
+      };
+      // nombre/telefono son NOT NULL: si llegan vacíos, se conserva el valor actual
+      const keepReq = (v, curVal) => {
+        const c = clean(v);
+        return c === undefined || c === null ? curVal : c;
+      };
+
+      const next = {
+        nombre: keepReq(b.nombre, cur.nombre),
+        telefono: keepReq(b.telefono, cur.telefono),
+        apellidos: b.apellidos !== undefined ? clean(b.apellidos) : cur.apellidos,
+        fecha_nacimiento: b.fecha_nacimiento !== undefined ? clean(b.fecha_nacimiento) : cur.fecha_nacimiento,
+        email: b.email !== undefined ? clean(b.email) : cur.email,
+        direccion: b.direccion !== undefined ? clean(b.direccion) : cur.direccion,
+      };
+
+      // Auto-marca "completo" cuando ya tiene los 3 datos clave.
+      const completo = Boolean(next.apellidos && next.email && next.fecha_nacimiento);
+      const registro_incompleto = completo ? 0 : (cur.registro_incompleto ?? 0);
+
+      await db.query(
+        `UPDATE pacientes
+           SET nombre=?, apellidos=?, telefono=?, fecha_nacimiento=?, email=?, direccion=?, foto_perfil_url=?, registro_incompleto=?
+         WHERE id=?`,
+        [next.nombre, next.apellidos, next.telefono, next.fecha_nacimiento, next.email, next.direccion, fotoPerfilUrl, registro_incompleto, id]
       );
-  
-      if (result.affectedRows === 0) {
-        return res.status(404).json({ error: 'Paciente no encontrado' });
-      }
-  
-      res.json({ message: 'Paciente actualizado exitosamente.' });
+
+      res.json({ message: 'Paciente actualizado exitosamente.', registro_incompleto });
     })
   );
 

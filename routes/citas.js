@@ -1,146 +1,93 @@
 // routes/citas.js
+// ---------------------------------------------------------------------------
+// Citas de un paciente, respaldadas por GOOGLE CALENDAR (fuente de verdad).
+// Montado en /api/pacientes/:patientId/citas (hereda patientId con mergeParams).
+//
+// Fase 1: listar (GET /) y crear (POST /). Editar/eliminar y reconciliación
+// de Confirmafy llegan en la Fase 2.
+//
+// NOTA: la tabla MySQL `citas` queda como LEGACY (ya no se usa desde aquí).
+// ---------------------------------------------------------------------------
 const express = require('express');
-// mergeParams: true para heredar patientId de la ruta padre
-const router  = express.Router({ mergeParams: true });
-const db      = require('../config/db');
+const router = express.Router({ mergeParams: true });
+
+const gcal = require('../services/googleCalendar');
+const { getService, getPatientContact } = require('../services/lookups');
+
 const asyncHandler = (fn) => (req, res, next) =>
   Promise.resolve(fn(req, res, next)).catch(next);
 
-// 1) Listar todas las citas de un paciente
-//    GET /api/pacientes/:patientId/citas
+// Traduce errores de configuración de GCal a respuestas HTTP claras.
+// Devuelve true si ya respondió; false si el error debe propagarse.
+function respondGcalConfigError(res, err) {
+  if (err.code === 'GCAL_NOT_CONFIGURED') {
+    res.status(503).json({ error: 'Google Calendar no está configurado en el servidor.' });
+    return true;
+  }
+  if (err.code === 'GCAL_BAD_KEY') {
+    res.status(500).json({ error: 'Credenciales de Google Calendar inválidas.' });
+    return true;
+  }
+  return false;
+}
+
+// GET /api/pacientes/:patientId/citas  -> citas del paciente (desde GCal)
 router.get(
   '/',
   asyncHandler(async (req, res) => {
     const { patientId } = req.params;
-  const query = `
-    SELECT
-      c.id,
-      c.appointment_at,
-      c.service_id,
-      s.name AS tratamiento,
-      c.observaciones,
-      c.created_at,
-      c.updated_at
-    FROM citas c
-    LEFT JOIN services s ON s.id = c.service_id
-    WHERE c.patient_id = ?
-    ORDER BY c.appointment_at DESC
-  `;
-    const [rows] = await db.query(query, [patientId]);
-    res.json(rows);
-  })
-);
-
-// 2) Obtener una cita en particular
-//    GET /api/pacientes/:patientId/citas/:id
-router.get(
-  '/:id',
-  asyncHandler(async (req, res) => {
-    const { patientId, id } = req.params;
-    const query = `
-      SELECT
-        c.id,
-        c.appointment_at,
-        c.service_id,
-        s.name          AS tratamiento,
-        c.observaciones,
-        c.created_at,
-        c.updated_at
-      FROM citas c
-      LEFT JOIN services s
-        ON s.id = c.service_id
-      WHERE c.patient_id = ? AND c.id = ?
-    `;
-    const [rows] = await db.query(query, [patientId, id]);
-    if (rows.length === 0) {
-      return res.status(404).json({ error: 'Cita no encontrada' });
+    const { from, to } = req.query; // opcionales, RFC3339
+    try {
+      const appts = await gcal.listByPatient(patientId, { timeMin: from, timeMax: to });
+      res.json(appts);
+    } catch (err) {
+      if (respondGcalConfigError(res, err)) return;
+      throw err;
     }
-    res.json(rows[0]);
   })
 );
 
-// 3) Crear una nueva cita
-//    POST /api/pacientes/:patientId/citas
+// POST /api/pacientes/:patientId/citas  -> crea cita en GCal
 router.post(
   '/',
   asyncHandler(async (req, res) => {
     const { patientId } = req.params;
-    const { appointment_at, service_id, observaciones } = req.body;
-    if (!appointment_at || !service_id) {
-      return res
-        .status(400)
-        .json({ error: 'Fecha y servicio son obligatorios' });
-    }
-    const insertSql = `
-      INSERT INTO citas (
-        patient_id,
-        service_id,
-        appointment_at,
-        observaciones,
-        created_at,
-        updated_at
-      ) VALUES (?, ?, ?, ?, NOW(), NOW())
-    `;
-    const [result] = await db.query(insertSql, [
-      patientId,
-      service_id,
-      appointment_at,
-      observaciones || null,
-    ]);
-    res
-      .status(201)
-      .json({ id: result.insertId, message: 'Cita creada exitosamente.' });
-  })
-);
+    const { start, end, serviceId, serviceName: serviceNameIn, observaciones, status } = req.body;
 
-// 4) Actualizar una cita existente
-//    PUT /api/pacientes/:patientId/citas/:id
-router.put(
-  '/:id',
-  asyncHandler(async (req, res) => {
-    const { patientId, id } = req.params;
-    const { appointment_at, service_id, observaciones } = req.body;
-    const updateSql = `
-      UPDATE citas
-      SET
-        appointment_at = ?,
-        service_id     = ?,
-        observaciones  = ?,
-        updated_at     = NOW()
-      WHERE id = ? AND patient_id = ?
-    `;
-    const [result] = await db.query(updateSql, [
-      appointment_at,
-      service_id,
-      observaciones || null,
-      id,
-      patientId,
-    ]);
-    if (result.affectedRows === 0) {
-      return res
-        .status(404)
-        .json({ error: 'Cita no encontrada o no pertenece al paciente.' });
+    if (!start || !end) {
+      return res.status(400).json({ error: 'start y end son obligatorios (RFC3339).' });
     }
-    res.json({ message: 'Cita actualizada exitosamente.' });
-  })
-);
+    // El paciente debe existir; el tratamiento es OPCIONAL.
+    const pac = await getPatientContact(patientId);
+    if (!pac) return res.status(404).json({ error: 'El paciente no existe.' });
+    let serviceName = null;
+    if (serviceId) {
+      const svc = await getService(serviceId);
+      if (!svc) return res.status(400).json({ error: 'El servicio indicado no existe.' });
+      serviceName = svc.name;
+    } else if (serviceNameIn) {
+      serviceName = String(serviceNameIn); // p. ej. "Chequeo General" por defecto
+    }
 
-// 5) Eliminar una cita
-//    DELETE /api/pacientes/:patientId/citas/:id
-router.delete(
-  '/:id',
-  asyncHandler(async (req, res) => {
-    const { patientId, id } = req.params;
-    const [result] = await db.query(
-      'DELETE FROM citas WHERE id = ? AND patient_id = ?',
-      [id, patientId]
-    );
-    if (result.affectedRows === 0) {
-      return res
-        .status(404)
-        .json({ error: 'Cita no encontrada o no pertenece al paciente.' });
+    try {
+      const contactName = `${pac.nombre || ''} ${pac.apellidos || ''}`.trim() || undefined;
+      const contactPhone = String(pac.telefono || '').replace(/\D/g, '') || undefined;
+      const created = await gcal.create({
+        patientId,
+        start,
+        end,
+        serviceId,
+        serviceName,
+        contactName,   // para el título legible
+        contactPhone,  // para que Confirmafy recuerde por WhatsApp
+        observations: observaciones,
+        status,
+      });
+      res.status(201).json(created);
+    } catch (err) {
+      if (respondGcalConfigError(res, err)) return;
+      throw err;
     }
-    res.json({ message: 'Cita eliminada exitosamente.' });
   })
 );
 
