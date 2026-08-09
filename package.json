@@ -6,7 +6,9 @@
     "test": "echo \"Error: no test specified\" && exit 1",
     "dev": "cross-env NODE_ENV=development nodemon app.js",
     "dev:once": "cross-env NODE_ENV=development node app.js",
-    "start": "cross-env NODE_ENV=production  node app.js"
+    "start": "cross-env NODE_ENV=production  node app.js",
+    "migrate": "node scripts/migrate.js",
+    "migrate:dev": "cross-env NODE_ENV=development node scripts/migrate.js"
   },
   "keywords": [],
   "author": "",
