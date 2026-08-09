@@ -295,6 +295,35 @@ async function update(eventId, changes = {}) {
   return eventToAppointment(res.data);
 }
 
+// -------- Sync incremental (para el espejo local `appointments`) --------
+// Devuelve eventos CRUDOS + nextSyncToken. Dos modos:
+//   - con syncToken: trae SOLO lo que cambió desde el último sync (incluye
+//     borrados, que llegan con status 'cancelled' gracias a showDeleted).
+//   - sin syncToken (primer sync): trae desde `timeMin` y Google entrega el
+//     nextSyncToken en la última página para arrancar los incrementales.
+// Nota: con syncToken NO se pueden mandar timeMin/orderBy (Google lo rechaza);
+// `singleEvents` debe ser consistente entre llamadas (siempre true aquí).
+async function listEventsForSync({ syncToken, timeMin } = {}) {
+  const { calendar, calendarId } = getClient();
+  const items = [];
+  let pageToken;
+  let nextSyncToken;
+  const base = { calendarId, singleEvents: true, maxResults: 2500 };
+  if (syncToken) {
+    base.syncToken = syncToken;
+    base.showDeleted = true;
+  } else if (timeMin) {
+    base.timeMin = timeMin;
+  }
+  do {
+    const res = await calendar.events.list({ ...base, pageToken });
+    for (const e of res.data.items || []) items.push(e);
+    nextSyncToken = res.data.nextSyncToken || nextSyncToken;
+    pageToken = res.data.nextPageToken || undefined;
+  } while (pageToken);
+  return { items, nextSyncToken };
+}
+
 // -------- Eliminar una cita --------
 async function remove(eventId) {
   const { calendar, calendarId } = getClient();
@@ -311,6 +340,7 @@ module.exports = {
   linkToPatient,
   update,
   remove,
+  listEventsForSync,
   eventToAppointment,
   appointmentToEventBody,
   extractPhone,

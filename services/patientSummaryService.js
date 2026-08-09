@@ -1,6 +1,7 @@
 // services/patientSummaryService.js
 const pool = require("../config/db");
-const gcal = require("./googleCalendar"); // citas viven en Google Calendar (la tabla `citas` es legacy)
+// Las citas viven en Google Calendar; aquí se leen del espejo local `appointments`
+// (se mantiene al día en services/appointmentsSync.js).
 
 async function getPatientSummary(patientId) {
   const pid = Number(patientId);
@@ -41,36 +42,42 @@ async function getPatientSummary(patientId) {
     );
     const lastService = serviceRows[0] || null;
 
-    // 3) Citas desde Google Calendar (la tabla `citas` quedó legacy).
-    //    Devolvemos la ÚLTIMA pasada y la PRÓXIMA futura. Si GCal no está
-    //    configurado o falla, NO rompemos el resumen (quedan en null).
+    // 3) Citas desde el ESPEJO local `appointments` (se sincroniza con Google
+    //    Calendar en appointmentsSync). Consulta rápida por índice; devolvemos
+    //    la ÚLTIMA pasada y la PRÓXIMA futura. Comparamos contra UTC_TIMESTAMP()
+    //    porque start_at se guarda en UTC.
     let lastAppointment = null;
     let nextAppointment = null;
     try {
-      const appts = await gcal.listByPatient(pid); // vinculadas al paciente, orden asc por inicio
-      const now = Date.now();
-      // Normalizamos al shape que ya consume la UI/IA (appointment_at + service_name).
-      const toSummary = (a) =>
-        a && {
-          eventId: a.eventId,
-          appointment_at: a.start, // alias esperado por la UI y clinic-ai
-          start: a.start,
-          end: a.end,
-          service_name: a.treatment, // etiqueta mostrable (tratamiento o título del evento)
-          observaciones: a.observations,
-          status: a.status,
-          source: a.source,
+      const cols = `event_id, start_iso, end_iso, treatment, observations, status, source`;
+      const [pastRows] = await conn.query(
+        `SELECT ${cols} FROM appointments
+         WHERE patient_id = ? AND start_at IS NOT NULL AND start_at <= UTC_TIMESTAMP()
+         ORDER BY start_at DESC LIMIT 1`,
+        [pid]
+      );
+      const [nextRows] = await conn.query(
+        `SELECT ${cols} FROM appointments
+         WHERE patient_id = ? AND start_at IS NOT NULL AND start_at > UTC_TIMESTAMP()
+         ORDER BY start_at ASC LIMIT 1`,
+        [pid]
+      );
+      const toSummary = (r) =>
+        r && {
+          eventId: r.event_id,
+          appointment_at: r.start_iso, // alias esperado por la UI y clinic-ai
+          start: r.start_iso,
+          end: r.end_iso,
+          service_name: r.treatment, // etiqueta mostrable (tratamiento o título)
+          observaciones: r.observations,
+          status: r.status,
+          source: r.source,
         };
-      const withStart = appts.filter((a) => a.start && !Number.isNaN(new Date(a.start).getTime()));
-      const past = withStart.filter((a) => new Date(a.start).getTime() <= now);
-      const upcoming = withStart.filter((a) => new Date(a.start).getTime() > now);
-      lastAppointment = toSummary(past[past.length - 1]); // más reciente pasada
-      nextAppointment = toSummary(upcoming[0]); // más próxima futura
+      lastAppointment = toSummary(pastRows[0]);
+      nextAppointment = toSummary(nextRows[0]);
     } catch (e) {
-      // GCAL_NOT_CONFIGURED u otro error de Calendar: dejamos las citas en null.
-      if (e && e.code !== "GCAL_NOT_CONFIGURED") {
-        console.warn("patientSummary: no se pudieron leer citas de GCal:", e.message);
-      }
+      // Si el espejo aún no existe (migración/sync pendiente), no rompemos el resumen.
+      console.warn("patientSummary: no se pudieron leer citas del espejo:", e.message);
     }
 
     // 4) Último pago

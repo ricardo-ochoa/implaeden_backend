@@ -148,4 +148,11 @@ app.use((err, _req, res, _next) => {
 const PORT = process.env.PORT || 4000;
 app.listen(PORT, () => {
   console.log(`Servidor corriendo en ${env} en puerto ${PORT}`);
+  // Espejo local de citas (Google Calendar -> MySQL). Sin deps ni cron externo:
+  // corre en el mismo proceso con setInterval. No-op si GCal no está configurado.
+  try {
+    require("./services/appointmentsSync").startSyncLoop();
+  } catch (e) {
+    console.warn("[gcal-sync] no se pudo iniciar:", e.message);
+  }
 });
