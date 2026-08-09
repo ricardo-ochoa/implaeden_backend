@@ -34,7 +34,7 @@ function formatDateTime(dateString) {
 }
 
 function summaryToSsml(summary) {
-  const { patient, lastService, lastAppointment, lastPayment } = summary || {}
+  const { patient, lastService, lastAppointment, nextAppointment, lastPayment } = summary || {}
   const fullName = patient ? `${patient.nombre || ""} ${patient.apellidos || ""}`.trim() : "Paciente";
 
   const lines = [];
@@ -67,6 +67,19 @@ function summaryToSsml(summary) {
   lines.push(`Última cita registrada: ${parts.join(", ")}.`);
 } else {
   lines.push("Última cita registrada: no hay citas registradas.");
+}
+
+  if (nextAppointment) {
+  const fecha = nextAppointment.appointment_at
+    ? formatDateTime(nextAppointment.appointment_at)
+    : "Sin fecha";
+
+  const parts = [fecha];
+  if (nextAppointment.service_name) parts.push(`para ${nextAppointment.service_name}`);
+
+  lines.push(`Próxima cita: ${parts.join(", ")}.`);
+} else {
+  lines.push("Próxima cita: no hay próximas citas.");
 }
 
   if (lastPayment) {
