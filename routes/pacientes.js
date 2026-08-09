@@ -115,12 +115,22 @@ router.post(
   '/',
   upload.single('foto'),
   asyncHandler(async (req, res) => {
-    const { nombre, apellidos, telefono, fecha_nacimiento, email, direccion } = req.body;
-  
-    if (!nombre || !apellidos || !telefono || !fecha_nacimiento || !email || !direccion) {
-      return res.status(400).json({ error: 'Todos los campos son obligatorios.' });
+    const b = req.body || {};
+    // Solo Nombre, Apellidos y Teléfono son obligatorios (registro rápido para
+    // pacientes que llegan de citas de Google Calendar / manuales). El resto es
+    // opcional: '' -> NULL para no romper tipos (DATE) ni guardar strings vacíos.
+    const clean = (v) => (v === undefined || v === null || String(v).trim() === '' ? null : String(v).trim());
+    const nombre = clean(b.nombre);
+    const apellidos = clean(b.apellidos);
+    const telefono = clean(b.telefono);
+    const fecha_nacimiento = clean(b.fecha_nacimiento);
+    const email = clean(b.email);
+    const direccion = clean(b.direccion);
+
+    if (!nombre || !apellidos || !telefono) {
+      return res.status(400).json({ error: 'Nombre, apellidos y teléfono son obligatorios.' });
     }
-  
+
     let fotoPerfilUrl = null;
     if (req.file) {
       try {
@@ -129,12 +139,15 @@ router.post(
         return res.status(500).json({ error: 'Error al subir el archivo.' });
       }
     }
-  
+
+    // Marca registro_incompleto si faltan datos "completos" (misma regla que el PUT).
+    const registro_incompleto = Boolean(email && fecha_nacimiento) ? 0 : 1;
+
     const [result] = await db.query(
-      'INSERT INTO pacientes (nombre, apellidos, telefono, fecha_nacimiento, email, direccion, foto_perfil_url, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, NOW(), NOW())',
-      [nombre, apellidos, telefono, fecha_nacimiento, email, direccion, fotoPerfilUrl]
+      'INSERT INTO pacientes (nombre, apellidos, telefono, fecha_nacimiento, email, direccion, foto_perfil_url, registro_incompleto, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, NOW(), NOW())',
+      [nombre, apellidos, telefono, fecha_nacimiento, email, direccion, fotoPerfilUrl, registro_incompleto]
     );
-  
+
     res.status(201).json({ id: result.insertId, message: 'Paciente agregado exitosamente.' });
   })
 );
