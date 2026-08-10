@@ -16,6 +16,18 @@ async function safeLogEvent(payload) {
   }
 }
 
+// Resuelve el id de un catálogo de pagos por NOMBRE, sin distinguir mayúsculas
+// (los datos tienen inconsistencias: 'Efectivo' vs 'efectivo'). `table` es un
+// literal controlado internamente ('payment_methods' | 'payment_statuses').
+async function idByName(table, name) {
+  if (!name) return null
+  const [rows] = await db.query(
+    `SELECT id FROM ${table} WHERE LOWER(name) = LOWER(?) LIMIT 1`,
+    [String(name).trim()]
+  )
+  return rows.length ? rows[0].id : null
+}
+
 // ————————————————————————————————
 // 1) Obtener pagos + saldo de un paciente
 //    GET /api/pacientes/:patientId/pagos
@@ -118,28 +130,55 @@ router.post(
       monto,
       payment_method_id,
       payment_status_id: rawStatusId,
+      estado,        // alternativa: nombre del estado
+      metodo_pago,   // alternativa: nombre del método
       notas,
     } = req.body
 
-    // 1) default payment_status_id = "finalizado"
-    let payment_status_id = rawStatusId
-    if (!payment_status_id) {
-      const [statusRows] = await db.query(
-        'SELECT id FROM payment_statuses WHERE name = ? LIMIT 1',
-        ['finalizado']
-      )
-      payment_status_id = statusRows.length ? statusRows[0].id : 1
+    // ── Validación: monto > 0 ─────────────────────────────────────────────
+    const montoNum = Number(monto)
+    if (!Number.isFinite(montoNum) || montoNum <= 0) {
+      return res.status(400).json({ error: 'El monto debe ser un número mayor a 0.' })
     }
 
-    // 2) default payment_method_id = "efectivo"
-    let pmId = payment_method_id
-    if (!pmId) {
-      const [methodRows] = await db.query(
-        'SELECT id FROM payment_methods WHERE name = ? LIMIT 1',
-        ['efectivo']
+    // ── Validación: el tratamiento (si viene) pertenece a ESTE paciente ───
+    //    De paso calculamos el saldo previo para (a) derivar el estado y
+    //    (b) avisar de sobre-pago. NO bloqueamos el sobre-pago (decisión:
+    //    "permitir con aviso"); solo lo señalamos en la respuesta.
+    const svcId = patient_service_id ? Number(patient_service_id) : null
+    let saldoAntes = null
+    if (svcId) {
+      const [svRows] = await db.query(
+        `SELECT sv.total_cost,
+                IFNULL((SELECT SUM(monto) FROM patient_payments WHERE patient_service_id = sv.id), 0) AS pagado
+           FROM patient_services sv
+          WHERE sv.id = ? AND sv.patient_id = ?
+          LIMIT 1`,
+        [svcId, patientId]
       )
-      pmId = methodRows.length ? methodRows[0].id : null
+      if (!svRows.length) {
+        return res.status(400).json({ error: 'El tratamiento indicado no pertenece a este paciente.' })
+      }
+      saldoAntes = Number(svRows[0].total_cost) - Number(svRows[0].pagado)
     }
+    const overpay = saldoAntes != null && montoNum - saldoAntes > 0.009
+
+    // ── Estado del pago ───────────────────────────────────────────────────
+    //    Prioridad: id explícito > nombre explícito > AUTOMÁTICO por saldo.
+    //    Auto: si el abono salda el tratamiento → 'finalizado'; si queda saldo
+    //    → 'abono'. Un pago sin tratamiento asociado se marca 'finalizado'.
+    let payment_status_id = rawStatusId || (await idByName('payment_statuses', estado))
+    if (!payment_status_id) {
+      let statusName = 'finalizado'
+      if (svcId && saldoAntes != null) {
+        statusName = saldoAntes - montoNum > 0.009 ? 'abono' : 'finalizado'
+      }
+      payment_status_id = (await idByName('payment_statuses', statusName)) || 1
+    }
+
+    // ── Método de pago (default 'Efectivo', tolerante a mayúsculas) ───────
+    let pmId = payment_method_id || (await idByName('payment_methods', metodo_pago))
+    if (!pmId) pmId = await idByName('payment_methods', 'Efectivo')
 
     const invoiceNumber = `F-${Date.now()}`
 
@@ -160,9 +199,9 @@ router.post(
 
     const [ins] = await db.query(insertSql, [
       patientId,
-      patient_service_id || null,
+      svcId,
       fecha,
-      parseFloat(monto),
+      montoNum,
       pmId,
       payment_status_id,
       invoiceNumber,
@@ -216,7 +255,8 @@ router.post(
       [ins.insertId]
     )
 
-    res.status(201).json(rows[0])
+    // `overpay` avisa al frontend que el pago superó el saldo (no se bloquea).
+    res.status(201).json({ ...rows[0], overpay })
   })
 )
 
@@ -248,28 +288,39 @@ router.put(
     }
     const before = beforeRows[0]
 
-    // Traducir estado a payment_status_id si envían nombre
-    if (!payment_status_id && estado) {
-      const [rows] = await db.query(
-        'SELECT id FROM payment_statuses WHERE name = ?',
-        [estado]
-      )
-      if (!rows.length) {
-        return res.status(400).json({ error: `Estado desconocido: ${estado}` })
+    // Validación: monto > 0 (solo si viene en el update)
+    if (monto !== undefined && monto !== null && monto !== '') {
+      const m = Number(monto)
+      if (!Number.isFinite(m) || m <= 0) {
+        return res.status(400).json({ error: 'El monto debe ser un número mayor a 0.' })
       }
-      payment_status_id = rows[0].id
     }
 
-    // Traducir metodo_pago a payment_method_id si envían nombre
-    if (!payment_method_id && req.body.metodo_pago) {
-      const [mrows] = await db.query(
-        'SELECT id FROM payment_methods WHERE name = ?',
-        [req.body.metodo_pago]
+    // Validación: si cambian el tratamiento, que pertenezca a ESTE paciente
+    if (patient_service_id != null && Number(patient_service_id) !== Number(before.patient_service_id)) {
+      const [svRows] = await db.query(
+        'SELECT id FROM patient_services WHERE id = ? AND patient_id = ? LIMIT 1',
+        [Number(patient_service_id), patientId]
       )
-      if (!mrows.length) {
+      if (!svRows.length) {
+        return res.status(400).json({ error: 'El tratamiento indicado no pertenece a este paciente.' })
+      }
+    }
+
+    // Traducir estado (nombre) → payment_status_id, tolerante a mayúsculas
+    if (!payment_status_id && estado) {
+      payment_status_id = await idByName('payment_statuses', estado)
+      if (!payment_status_id) {
+        return res.status(400).json({ error: `Estado desconocido: ${estado}` })
+      }
+    }
+
+    // Traducir metodo_pago (nombre) → payment_method_id, tolerante a mayúsculas
+    if (!payment_method_id && req.body.metodo_pago) {
+      payment_method_id = await idByName('payment_methods', req.body.metodo_pago)
+      if (!payment_method_id) {
         return res.status(400).json({ error: `Método desconocido: ${req.body.metodo_pago}` })
       }
-      payment_method_id = mrows[0].id
     }
 
     const updateSql = `
