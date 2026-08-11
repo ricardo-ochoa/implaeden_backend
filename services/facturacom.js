@@ -89,18 +89,29 @@ function buildOrder(payment) {
 
 async function apiFetch(path, { method = 'GET', body } = {}) {
   const url = `${process.env.FACTURACOM_API_URL}${path}`
-  const res = await fetch(url, {
-    method,
-    headers: {
-      'F-Api-Key': process.env.FACTURACOM_API_KEY,
-      'F-Secret-Key': process.env.FACTURACOM_SECRET_KEY,
-      'Content-Type': 'application/json',
-    },
-    body: body ? JSON.stringify(body) : undefined,
-  })
-  let json = {}
-  try { json = await res.json() } catch (_) {}
-  return { ok: res.ok, status: res.status, json }
+  // Timeout para que una API lenta/caída no cuelgue el proceso (default 8s).
+  const controller = new AbortController()
+  const timer = setTimeout(
+    () => controller.abort(),
+    Number(process.env.FACTURACOM_TIMEOUT_MS || 8000)
+  )
+  try {
+    const res = await fetch(url, {
+      method,
+      headers: {
+        'F-Api-Key': process.env.FACTURACOM_API_KEY,
+        'F-Secret-Key': process.env.FACTURACOM_SECRET_KEY,
+        'Content-Type': 'application/json',
+      },
+      body: body ? JSON.stringify(body) : undefined,
+      signal: controller.signal,
+    })
+    let json = {}
+    try { json = await res.json() } catch (_) {}
+    return { ok: res.ok, status: res.status, json }
+  } finally {
+    clearTimeout(timer)
+  }
 }
 
 // Crea (o recupera si ya existe) la orden del pago. Devuelve { softId }.

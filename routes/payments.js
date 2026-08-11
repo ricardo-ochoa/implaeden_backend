@@ -324,8 +324,9 @@ router.post(
       [ins.insertId]
     )
 
-    // Sync a factura.com (no-op si no está configurado; no rompe si falla).
-    await syncAutofacCreate({ ...rows[0], monto: montoNum })
+    // Sync a factura.com — NO bloqueante: nunca demora ni rompe la respuesta del
+    // pago (si factura.com está lento/caído, se sincroniza igual en segundo plano).
+    syncAutofacCreate({ ...rows[0], monto: montoNum }).catch(() => {})
 
     // `overpay` avisa al frontend que el pago superó el saldo (no se bloquea).
     res.status(201).json({ ...rows[0], overpay })
@@ -443,8 +444,8 @@ router.put(
       createdBy: req.user?.id ?? null,
     })
 
-    // Sync del cambio a factura.com (si aplica y no está facturada).
-    await syncAutofacUpdate(Number(id), Number(patientId))
+    // Sync del cambio a factura.com — NO bloqueante (ver POST).
+    syncAutofacUpdate(Number(id), Number(patientId)).catch(() => {})
 
     res.json({ message: 'Pago actualizado exitosamente.' })
   })
@@ -488,8 +489,8 @@ router.delete(
       createdBy: req.user?.id ?? null,
     })
 
-    // Borra también la orden en factura.com (si aplica y no está facturada).
-    await syncAutofacDelete(before)
+    // Borra también la orden en factura.com — NO bloqueante (ver POST).
+    syncAutofacDelete(before).catch(() => {})
 
     res.json({ message: 'Pago eliminado exitosamente.' })
   })
