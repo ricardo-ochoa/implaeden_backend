@@ -127,6 +127,8 @@ router.get(
         ps.name AS estado,
 
         pp.numero_factura,
+        pp.autofac_status,
+        pp.autofac_soft_id,
         pp.notas,
         pp.created_at,
         pp.updated_at
@@ -178,7 +180,10 @@ router.get(
     `
 
     const [rows] = await db.query(query, [patientId, patientId])
-    res.json(rows)
+    // `autofac_folio` = el folio con el que la orden vive en factura.com
+    // (folioFor(id) = prefijo + id). Es EL folio que el paciente teclea para
+    // autofacturar → la app debe mostrar este, no el numero_factura interno.
+    res.json(rows.map((r) => ({ ...r, autofac_folio: facturacom.folioFor(r.id) })))
   })
 )
 
@@ -328,8 +333,9 @@ router.post(
     // pago (si factura.com está lento/caído, se sincroniza igual en segundo plano).
     syncAutofacCreate({ ...rows[0], monto: montoNum }).catch(() => {})
 
-    // `overpay` avisa al frontend que el pago superó el saldo (no se bloquea).
-    res.status(201).json({ ...rows[0], overpay })
+    // `overpay` avisa que el pago superó el saldo; `autofac_folio` es el folio
+    // de autofacturación (el que el paciente teclea en el portal de factura.com).
+    res.status(201).json({ ...rows[0], overpay, autofac_folio: facturacom.folioFor(rows[0].id) })
   })
 )
 
