@@ -129,11 +129,14 @@ router.get(
         pp.numero_factura,
         pp.autofac_status,
         pp.autofac_soft_id,
+        pac.nombre    AS paciente_nombre,
+        pac.apellidos AS paciente_apellidos,
         pp.notas,
         pp.created_at,
         pp.updated_at
 
       FROM patient_payments pp
+      LEFT JOIN pacientes pac ON pac.id = pp.patient_id
       LEFT JOIN patient_services sv ON sv.id = pp.patient_service_id
       LEFT JOIN services s ON s.id = sv.service_id
 
