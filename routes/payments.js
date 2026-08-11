@@ -3,6 +3,7 @@ const express = require('express')
 const router = express.Router({ mergeParams: true })
 const db = require('../config/db')
 const { logPatientEvent } = require('../utils/logPatientEvent')
+const facturacom = require('../services/facturacom')
 
 const asyncHandler = (fn) => (req, res, next) =>
   Promise.resolve(fn(req, res, next)).catch(next)
@@ -26,6 +27,72 @@ async function idByName(table, name) {
     [String(name).trim()]
   )
   return rows.length ? rows[0].id : null
+}
+
+// ————————————————————————————————
+// Sync con factura.com (autofacturación). Best-effort: si factura.com no está
+// configurado (sin llaves) NO hace nada; si falla, NO rompe la operación de pago.
+// El FOLIO de la orden = patient_payments.id.
+// ————————————————————————————————
+async function syncAutofacCreate(payment) {
+  if (!facturacom.isConfigured()) return
+  try {
+    const { softId } = await facturacom.createOrder(payment)
+    await db.query(
+      'UPDATE patient_payments SET autofac_soft_id = ?, autofac_status = ?, autofac_synced_at = NOW() WHERE id = ?',
+      [softId, softId ? 'loaded' : 'error', payment.id]
+    )
+  } catch (e) {
+    console.warn('facturacom(create):', e.message)
+    try {
+      await db.query(
+        'UPDATE patient_payments SET autofac_status = ?, autofac_synced_at = NOW() WHERE id = ?',
+        ['error', payment.id]
+      )
+    } catch (_) {}
+  }
+}
+
+async function syncAutofacUpdate(paymentId, patientId) {
+  if (!facturacom.isConfigured()) return
+  try {
+    const [rows] = await db.query(
+      `SELECT pp.id, pp.monto, pp.fecha, pm.name AS metodo_pago,
+              pp.autofac_soft_id, pp.autofac_status
+         FROM patient_payments pp
+         LEFT JOIN payment_methods pm ON pm.id = pp.payment_method_id
+        WHERE pp.id = ? AND pp.patient_id = ? LIMIT 1`,
+      [paymentId, patientId]
+    )
+    const p = rows[0]
+    if (!p) return
+    if (p.autofac_status === 'invoiced') return          // ya facturada: no se toca
+    if (!p.autofac_soft_id) return syncAutofacCreate(p)  // aún no cargada: crearla
+    const order = facturacom.buildOrder(p)
+    const { ok } = await facturacom.updateOrder(order.folio, {
+      importe: order.importe,
+      fecha: order.fecha,
+      vencimiento: order.vencimiento,
+      iva: order.iva,
+      formaDePago: order.formaDePago,
+    })
+    await db.query(
+      'UPDATE patient_payments SET autofac_status = ?, autofac_synced_at = NOW() WHERE id = ?',
+      [ok ? 'loaded' : 'error', paymentId]
+    )
+  } catch (e) {
+    console.warn('facturacom(update):', e.message)
+  }
+}
+
+async function syncAutofacDelete(before) {
+  if (!facturacom.isConfigured()) return
+  if (before?.autofac_status === 'invoiced') return // no borrar orden ya facturada
+  try {
+    await facturacom.deleteOrder(String(before.id))
+  } catch (e) {
+    console.warn('facturacom(delete):', e.message)
+  }
 }
 
 // ————————————————————————————————
@@ -255,6 +322,9 @@ router.post(
       [ins.insertId]
     )
 
+    // Sync a factura.com (no-op si no está configurado; no rompe si falla).
+    await syncAutofacCreate({ ...rows[0], monto: montoNum })
+
     // `overpay` avisa al frontend que el pago superó el saldo (no se bloquea).
     res.status(201).json({ ...rows[0], overpay })
   })
@@ -371,6 +441,9 @@ router.put(
       createdBy: req.user?.id ?? null,
     })
 
+    // Sync del cambio a factura.com (si aplica y no está facturada).
+    await syncAutofacUpdate(Number(id), Number(patientId))
+
     res.json({ message: 'Pago actualizado exitosamente.' })
   })
 )
@@ -386,7 +459,7 @@ router.delete(
 
     // ✅ leer antes de borrar para log correcto (y recuperar patient_service_id)
     const [rows] = await db.query(
-      'SELECT id, patient_service_id, fecha, monto, payment_method_id, payment_status_id, numero_factura, notas FROM patient_payments WHERE id = ? AND patient_id = ? LIMIT 1',
+      'SELECT id, patient_service_id, fecha, monto, payment_method_id, payment_status_id, numero_factura, notas, autofac_status FROM patient_payments WHERE id = ? AND patient_id = ? LIMIT 1',
       [id, patientId]
     )
     if (!rows.length) {
@@ -412,6 +485,9 @@ router.delete(
       meta: { payment_id: Number(id), before },
       createdBy: req.user?.id ?? null,
     })
+
+    // Borra también la orden en factura.com (si aplica y no está facturada).
+    await syncAutofacDelete(before)
 
     res.json({ message: 'Pago eliminado exitosamente.' })
   })
