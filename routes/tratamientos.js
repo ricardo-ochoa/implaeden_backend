@@ -107,6 +107,18 @@ const toMoney = (n) =>
     Number(n || 0)
   )
 
+// Normaliza cualquier fecha (ISO con hora/offset, o ya 'YYYY-MM-DD') a solo
+// fecha 'YYYY-MM-DD'. Las columnas start_date/service_date son DATE y MySQL
+// rechaza un ISO con 'T...Z' (eso causaba el 500 al editar). Idempotente.
+const toDateOnly = (d) => {
+  if (!d) return null
+  const s = String(d)
+  if (/^\d{4}-\d{2}-\d{2}$/.test(s)) return s
+  const dt = new Date(s)
+  if (Number.isNaN(dt.getTime())) return null
+  return dt.toISOString().slice(0, 10)
+}
+
 const VALID_STATUSES = ["Por Iniciar", "En proceso", "Terminado"]
 const VALID_DOC_TYPES = ["budget", "start_letter", "end_letter"]
 
@@ -380,7 +392,7 @@ router.post(
         VALUES
           (?, ?, ?, ?, ?, NOW(), NOW())
         `,
-        [patientId, groupTitle, groupStartDate, groupStatus, null]
+        [patientId, groupTitle, toDateOnly(groupStartDate), groupStatus, null]
       )
       const groupId = g.insertId
 
@@ -392,6 +404,7 @@ router.post(
         const cost = item.total_cost == null || item.total_cost === "" ? 0 : toNumber(item.total_cost)
         const st = normalizeStatus(item.status)
         const qty = patientServicesHasQty ? normalizeQuantity(item.quantity) ?? 0 : 0
+        const svcDate = toDateOnly(item.service_date)
 
         let insertSql = ""
         let insertVals = []
@@ -403,7 +416,7 @@ router.post(
             VALUES
               (?, ?, ?, ?, ?, ?, ?, ?, ?, NOW(), NOW())
           `
-          insertVals = [patientId, groupId, sid, item.service_date, item.notes || null, st, Number(cost || 0), qty, createdBy]
+          insertVals = [patientId, groupId, sid, svcDate, item.notes || null, st, Number(cost || 0), qty, createdBy]
         } else if (patientServicesHasCreatedBy && !patientServicesHasQty) {
           insertSql = `
             INSERT INTO patient_services
@@ -411,7 +424,7 @@ router.post(
             VALUES
               (?, ?, ?, ?, ?, ?, ?, ?, NOW(), NOW())
           `
-          insertVals = [patientId, groupId, sid, item.service_date, item.notes || null, st, Number(cost || 0), createdBy]
+          insertVals = [patientId, groupId, sid, svcDate, item.notes || null, st, Number(cost || 0), createdBy]
         } else if (!patientServicesHasCreatedBy && patientServicesHasQty) {
           insertSql = `
             INSERT INTO patient_services
@@ -419,7 +432,7 @@ router.post(
             VALUES
               (?, ?, ?, ?, ?, ?, ?, ?, NOW(), NOW())
           `
-          insertVals = [patientId, groupId, sid, item.service_date, item.notes || null, st, Number(cost || 0), qty]
+          insertVals = [patientId, groupId, sid, svcDate, item.notes || null, st, Number(cost || 0), qty]
         } else {
           insertSql = `
             INSERT INTO patient_services
@@ -427,7 +440,7 @@ router.post(
             VALUES
               (?, ?, ?, ?, ?, ?, ?, NOW(), NOW())
           `
-          insertVals = [patientId, groupId, sid, item.service_date, item.notes || null, st, Number(cost || 0)]
+          insertVals = [patientId, groupId, sid, svcDate, item.notes || null, st, Number(cost || 0)]
         }
 
         const [ins] = await conn.query(insertSql, insertVals)
@@ -589,7 +602,7 @@ router.patch(
           return res.status(400).json({ error: "service_date/group_start_date inválido" })
         }
         sets.push("service_date = ?")
-        values.push(dateToSync)
+        values.push(toDateOnly(dateToSync))
       }
 
       if (service_id !== undefined) {
@@ -684,7 +697,7 @@ router.patch(
             SET start_date = ?, updated_at = NOW()
             WHERE id = ? AND patient_id = ?
             `,
-            [dateToSync, groupIdForEvent, patientId]
+            [toDateOnly(dateToSync), groupIdForEvent, patientId]
           )
         }
 
@@ -695,7 +708,7 @@ router.patch(
           SET service_date = ?, updated_at = NOW()
           WHERE patient_id = ? AND group_id = ?
           `,
-          [dateToSync, patientId, groupIdForEvent]
+          [toDateOnly(dateToSync), patientId, groupIdForEvent]
         )
       }
 
