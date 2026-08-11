@@ -253,6 +253,7 @@ router.post(
       INSERT INTO patient_payments (
         patient_id,
         patient_service_id,
+        tratamiento,
         fecha,
         monto,
         payment_method_id,
@@ -261,12 +262,13 @@ router.post(
         notas,
         created_at,
         updated_at
-      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, NOW(), NOW())
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, NOW(), NOW())
     `
 
     const [ins] = await db.query(insertSql, [
       patientId,
       svcId,
+      '', // `tratamiento` es columna legacy (NOT NULL sin default); el nombre real se muestra vía join
       fecha,
       montoNum,
       pmId,
