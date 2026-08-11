@@ -22,6 +22,17 @@ const IVA = String(process.env.FACTURACOM_IVA || '16')
 const VENCIMIENTO_DIAS = Number(process.env.FACTURACOM_VENCIMIENTO_DIAS || 30)
 const OBJETO_IMPUESTO = '02' // "Sí objeto de impuesto"
 
+// Prefijo opcional para el folio. Dev y prod comparten la MISMA cuenta de
+// factura.com; para que los folios de dev (= id del pago) no choquen con los de
+// prod, en dev se puede poner FACTURACOM_FOLIO_PREFIX (p. ej. "DEV"). En prod se
+// deja vacío para que el folio sea limpio (el que teclea el paciente).
+const FOLIO_PREFIX = String(process.env.FACTURACOM_FOLIO_PREFIX || '')
+
+// Folio de la orden a partir del id del pago (con prefijo opcional).
+function folioFor(id) {
+  return `${FOLIO_PREFIX}${id}`
+}
+
 // Método de pago (nombre nuestro) -> clave SAT de forma de pago.
 const SAT_FORMA_PAGO = {
   efectivo: '01',
@@ -66,7 +77,7 @@ function addDays(ymd, days) {
 function buildOrder(payment) {
   const fecha = toDateOnly(payment.fecha)
   return {
-    folio: String(payment.id),
+    folio: folioFor(payment.id),
     importe: Number(payment.monto || 0),
     fecha,
     vencimiento: addDays(fecha, VENCIMIENTO_DIAS),
@@ -128,6 +139,7 @@ module.exports = {
   deleteOrder,
   findByFolio,
   formaPagoFromMethod,
+  folioFor,
   toDateOnly,
   addDays,
 }

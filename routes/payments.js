@@ -89,7 +89,7 @@ async function syncAutofacDelete(before) {
   if (!facturacom.isConfigured()) return
   if (before?.autofac_status === 'invoiced') return // no borrar orden ya facturada
   try {
-    await facturacom.deleteOrder(String(before.id))
+    await facturacom.deleteOrder(facturacom.folioFor(before.id))
   } catch (e) {
     console.warn('facturacom(delete):', e.message)
   }
