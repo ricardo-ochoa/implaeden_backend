@@ -18,7 +18,9 @@
 //                                timbrado (default 30)
 // ---------------------------------------------------------------------------
 
-const IVA = String(process.env.FACTURACOM_IVA || '16')
+// Servicios dentales (persona física, servicios médicos) = IVA EXENTO.
+// Configurable por si algún concepto llevara tasa; default 'exento'.
+const IVA = String(process.env.FACTURACOM_IVA || 'exento')
 const VENCIMIENTO_DIAS = Number(process.env.FACTURACOM_VENCIMIENTO_DIAS || 30)
 const OBJETO_IMPUESTO = '02' // "Sí objeto de impuesto"
 
