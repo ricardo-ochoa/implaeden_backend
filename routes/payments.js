@@ -114,7 +114,7 @@ router.get(
         sv.group_id,
         gstart.group_start_date,
 
-        s.name AS tratamiento,
+        COALESCE(s.name, pp.tratamiento) AS tratamiento,
         sv.total_cost,
         pp.monto,
 
@@ -309,7 +309,7 @@ router.post(
          pp.id,
          pp.fecha,
          pp.patient_service_id,
-         s.name                AS tratamiento,
+         COALESCE(s.name, pp.tratamiento) AS tratamiento,
          sv.total_cost,
          IFNULL(pagg.total_pagado, 0)       AS total_pagado,
          (sv.total_cost - IFNULL(pagg.total_pagado, 0)) AS saldo_pendiente,

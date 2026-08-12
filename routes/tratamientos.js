@@ -955,6 +955,19 @@ router.delete(
       await db.query(`DELETE FROM service_documents WHERE patient_service_id = ?`, [treatmentId])
     }
 
+    // ✅ CONSERVA LOS PAGOS: antes de borrar el tratamiento, copia el nombre del
+    // servicio a la columna legacy patient_payments.tratamiento para que el pago
+    // siga siendo legible. El FK (ON DELETE SET NULL, migración 008) deja los
+    // pagos en la BD con patient_service_id = NULL, no los borra.
+    await db.query(
+      `UPDATE patient_payments pp
+         JOIN patient_services ps ON ps.id = pp.patient_service_id
+         JOIN services s ON s.id = ps.service_id
+          SET pp.tratamiento = s.name
+        WHERE pp.patient_service_id = ?`,
+      [treatmentId]
+    )
+
     const [result] = await db.query(
       "DELETE FROM patient_services WHERE id = ? AND patient_id = ?",
       [treatmentId, patientId]
