@@ -16,6 +16,8 @@
 const express = require('express');
 const router = express.Router({ mergeParams: true });
 const db = require('../config/db');
+const { construirExpedienteClinicoPdf } = require('../services/expedienteClinicoPdf');
+const { soloFecha } = require('./../services/pdfComun');
 
 const asyncHandler = (fn) => (req, res, next) =>
   Promise.resolve(fn(req, res, next)).catch(next);
@@ -92,6 +94,54 @@ router.get(
     );
 
     res.json(rows);
+  })
+);
+
+// GET /:id/pdf -> el formato FO-CD-00003 capturado, como PDF imprimible.
+// Va antes de GET /:id porque Express resuelve por orden de declaración.
+router.get(
+  '/:id/pdf',
+  asyncHandler(async (req, res) => {
+    const { patientId, id } = req.params;
+
+    const [pacientes] = await db.query('SELECT * FROM pacientes WHERE id = ?', [patientId]);
+    if (pacientes.length === 0) {
+      return res.status(404).json({ error: 'Paciente no encontrado.' });
+    }
+
+    const [rows] = await db.query(
+      'SELECT * FROM clinical_records WHERE id = ? AND patient_id = ?',
+      [id, patientId]
+    );
+    if (rows.length === 0) {
+      return res.status(404).json({ error: 'Expediente clínico no encontrado.' });
+    }
+
+    const expediente = { ...rows[0], form_data: parseFormData(rows[0].form_data) };
+
+    const buffer = await construirExpedienteClinicoPdf({
+      paciente: pacientes[0],
+      expediente,
+    });
+
+    const apellido = String(pacientes[0].apellidos || '')
+      .normalize('NFD')
+      .replace(/[\u0300-\u036f]/g, '')
+      .replace(/[^a-zA-Z0-9]+/g, '-')
+      .replace(/^-|-$/g, '')
+      .toLowerCase();
+
+    // mysql2 devuelve DATE como objeto Date; `soloFecha` lo normaliza a
+    // YYYY-MM-DD (un String(date).split('T') daría cadena vacía por el "Thu").
+    const fecha = soloFecha(expediente.record_date);
+    const nombreDescarga = `expediente-clinico-${apellido || patientId}-${fecha}.pdf`;
+
+    res.setHeader('Content-Type', 'application/pdf');
+    res.setHeader('Content-Disposition', `attachment; filename="${nombreDescarga}"`);
+    res.setHeader('Content-Length', buffer.length);
+    res.setHeader('Access-Control-Expose-Headers', 'Content-Disposition');
+
+    res.send(buffer);
   })
 );
 
