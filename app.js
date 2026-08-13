@@ -18,6 +18,8 @@ const uploadRoutes = require("./routes/uploads");
 const aiRoutes = require("./routes/ai");
 const pacienteRoutes = require("./routes/pacientes");
 const clinicalHistoryRoutes = require("./routes/clinicalHistories");
+const clinicalRecordRoutes = require("./routes/clinicalRecords");
+const doctorRoutes = require("./routes/doctors");
 const servicioRoutes = require("./routes/servicios");
 const emailRoutes = require("./routes/email");
 
@@ -109,6 +111,7 @@ app.use("/api/uploads", uploadRoutes);
  */
 app.use("/api/ai", authenticateJwt, aiRoutes);
 app.use("/api/clinical-histories", authenticateJwt, clinicalHistoryRoutes);
+app.use("/api/doctors", authenticateJwt, doctorRoutes);
 app.use("/api/servicios", authenticateJwt, servicioRoutes);
 app.use("/api/email", authenticateJwt, emailRoutes);
 app.use('/api/teeth', teethRouter)
@@ -119,6 +122,7 @@ app.use("/api/cobranza", authenticateJwt, cobranzaRoutes);
  * PROTECTED ROUTES (NESTED)
  * =========================
  */
+app.use("/api/pacientes/:patientId/expediente", authenticateJwt, clinicalRecordRoutes);
 app.use("/api/pacientes/:patientId/pagos", authenticateJwt, paymentsRoutes);
 app.use("/api/pacientes/:patientId/citas", authenticateJwt, citasRoutes);
 app.use("/api/pacientes/:patientId/events", authenticateJwt, patientTreatmentEventsRoutes);
