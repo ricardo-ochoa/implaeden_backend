@@ -24,6 +24,7 @@ const {
   sanitizar,
   formatearFecha,
   soloFecha,
+  hoyYMD,
 } = require('./pdfComun');
 
 const ALTO_ENCABEZADO = 28;
@@ -75,19 +76,20 @@ const tipoDeArchivo = (buf) => {
 const nombreArchivo = (url) => decodeURIComponent(String(url || '').split('/').pop() || 'archivo');
 
 /**
- * @param {object} paciente  fila de `pacientes`
- * @param {Array}  registros filas de `clinical_histories` ya ordenadas
- * @param {string} [fechaUnica] si se exporta un solo registro, su fecha
- * @returns {Promise<{ buffer: Buffer, incluidos: number, omitidos: Array }>}
+ * Agrega al documento las páginas de una lista de archivos escaneados.
+ *
+ * Vive aparte de `construirExpedientePdf` porque el PDF del historial completo
+ * (historialPdf.js) intercala estos archivos con los expedientes digitales,
+ * fecha por fecha, en vez de volcarlos todos de corrido.
+ *
+ * @param {PDFDocument} doc      documento destino
+ * @param {object} fuentes       { normal, negrita } ya incrustadas en `doc`
+ * @param {Array}  registros     filas de `clinical_histories` ya ordenadas
+ * @param {string} nombrePaciente para el encabezado de cada página
+ * @returns {Promise<{ incluidos: number, omitidos: Array }>}
  */
-async function construirExpedientePdf({ paciente, registros, fechaUnica }) {
-  const doc = await PDFDocument.create();
-  const helvetica = await doc.embedFont(StandardFonts.Helvetica);
-  const helveticaBold = await doc.embedFont(StandardFonts.HelveticaBold);
-
-  const nombrePaciente =
-    `${paciente?.nombre || ''} ${paciente?.apellidos || ''}`.trim() || 'Paciente';
-
+async function agregarArchivosAlPdf(doc, fuentes, registros, { nombrePaciente }) {
+  const helvetica = fuentes.normal;
   const omitidos = [];
   let incluidos = 0;
 
@@ -194,44 +196,116 @@ async function construirExpedientePdf({ paciente, registros, fechaUnica }) {
     }
   }
 
-  // Los omitidos se conocen hasta el final, así que esta página va al cierre.
-  if (omitidos.length) {
-    const page = doc.addPage([A4.ancho, A4.alto]);
-    let y = A4.alto - MARGEN - 12;
+  return { incluidos, omitidos };
+}
 
-    page.drawText('Archivos omitidos', { x: MARGEN, y, size: 14, font: helveticaBold, color: NEGRO });
-    y -= 18;
-    page.drawText('No se pudieron incluir en este PDF:', {
+/**
+ * Página de cierre con lo que no se pudo incluir. La arma quien orquesta el
+ * documento, porque los omitidos solo se conocen al terminar de recorrer todo.
+ */
+function agregarPaginaOmitidos(doc, fuentes, omitidos) {
+  if (!omitidos.length) return;
+
+  const helvetica = fuentes.normal;
+  const page = doc.addPage([A4.ancho, A4.alto]);
+  let y = A4.alto - MARGEN - 12;
+
+  page.drawText('Archivos omitidos', { x: MARGEN, y, size: 14, font: fuentes.negrita, color: NEGRO });
+  y -= 18;
+  page.drawText('No se pudieron incluir en este PDF:', {
+    x: MARGEN,
+    y,
+    size: 9,
+    font: helvetica,
+    color: GRIS,
+  });
+  y -= 20;
+
+  omitidos.forEach((o) => {
+    if (y < MARGEN) return;
+    page.drawText(sanitizar(`- ${o.archivo}: ${o.motivo}`), {
       x: MARGEN,
       y,
       size: 9,
       font: helvetica,
-      color: GRIS,
+      color: NEGRO,
     });
-    y -= 20;
+    y -= 14;
+  });
+}
 
-    omitidos.forEach((o) => {
-      if (y < MARGEN) return;
-      page.drawText(sanitizar(`- ${o.archivo}: ${o.motivo}`), {
+/**
+ * Índice de fechas para la portada. Se corta si topa con la caja del aviso de
+ * confidencialidad, que vive anclada al pie.
+ *
+ * @param {Array<{fecha: string, detalle: string}>} entradas
+ */
+function escribirContenido(page, fuentes, y, entradas) {
+  y -= 22;
+  page.drawText('Contenido', { x: MARGEN, y, size: 12, font: fuentes.negrita, color: NEGRO });
+  y -= 18;
+
+  const yMinimo = MARGEN + 190; // por encima del recuadro del aviso
+  let dibujadas = 0;
+
+  for (const entrada of entradas) {
+    if (y < yMinimo) {
+      page.drawText(sanitizar(`(+${entradas.length - dibujadas} registro(s) más)`), {
         x: MARGEN,
         y,
         size: 9,
-        font: helvetica,
-        color: NEGRO,
+        font: fuentes.normal,
+        color: GRIS,
       });
-      y -= 14;
+      break;
+    }
+    page.drawText(sanitizar(`${formatearFecha(entrada.fecha)} · ${entrada.detalle}`), {
+      x: MARGEN,
+      y,
+      size: 10,
+      font: fuentes.normal,
+      color: NEGRO,
     });
+    y -= 15;
+    dibujadas += 1;
   }
+
+  return y;
+}
+
+/**
+ * @param {object} paciente  fila de `pacientes`
+ * @param {Array}  registros filas de `clinical_histories` ya ordenadas
+ * @param {string} [fechaUnica] si se exporta un solo registro, su fecha
+ * @returns {Promise<{ buffer: Buffer, incluidos: number, omitidos: Array }>}
+ */
+async function construirExpedientePdf({ paciente, registros, fechaUnica }) {
+  const doc = await PDFDocument.create();
+  const fuentes = {
+    normal: await doc.embedFont(StandardFonts.Helvetica),
+    negrita: await doc.embedFont(StandardFonts.HelveticaBold),
+  };
+
+  const nombrePaciente =
+    `${paciente?.nombre || ''} ${paciente?.apellidos || ''}`.trim() || 'Paciente';
+
+  const { incluidos, omitidos } = await agregarArchivosAlPdf(doc, fuentes, registros, {
+    nombrePaciente,
+  });
+
+  agregarPaginaOmitidos(doc, fuentes, omitidos);
 
   // Portada al frente (insertPage la coloca en el índice 0).
   const portada = doc.insertPage(0, [A4.ancho, A4.alto]);
-  let y = A4.alto - MARGEN - 24;
 
-  // Portada compartida con el PDF del expediente digital: logo + aviso de
-  // confidencialidad. Devuelve la y por debajo de las líneas de cabecera.
-  const fechas = Object.keys(totalPorFecha).sort();
+  const porFecha = registros.reduce((acc, r) => {
+    const f = soloFecha(r.record_date);
+    acc[f] = (acc[f] || 0) + 1;
+    return acc;
+  }, {});
+  const fechas = Object.keys(porFecha).sort();
 
-  y = await escribirPortada(doc, portada, { normal: helvetica, negrita: helveticaBold }, {
+  const y = await escribirPortada(doc, portada, fuentes, {
     titulo: 'Expediente clínico',
     paciente: nombrePaciente,
     lineas: [
@@ -239,41 +313,31 @@ async function construirExpedientePdf({ paciente, registros, fechaUnica }) {
       fechaUnica
         ? `Registro del ${formatearFecha(fechaUnica)}`
         : `${fechas.length} registro(s) · ${registros.length} archivo(s)`,
-      `Generado el ${formatearFecha(new Date().toISOString().split('T')[0])}`,
+      `Generado el ${formatearFecha(hoyYMD())}`,
     ],
   });
 
-  // Índice de fechas cuando se exporta todo el historial. Se corta si topa con
-  // la caja del aviso de confidencialidad, que vive al pie de la portada.
   if (!fechaUnica) {
-    y -= 22;
-    portada.drawText('Contenido', { x: MARGEN, y, size: 12, font: helveticaBold, color: NEGRO });
-    y -= 18;
-
-    const yMinimo = MARGEN + 190; // por encima del recuadro del aviso
-    const cabenTodas = fechas.length;
-    let dibujadas = 0;
-
-    for (const fecha of fechas) {
-      if (y < yMinimo) {
-        portada.drawText(
-          sanitizar(`(+${cabenTodas - dibujadas} registro(s) más)`),
-          { x: MARGEN, y, size: 9, font: helvetica, color: GRIS }
-        );
-        break;
-      }
-      const total = totalPorFecha[fecha];
-      portada.drawText(
-        sanitizar(`${formatearFecha(fecha)} · ${total} archivo${total === 1 ? '' : 's'}`),
-        { x: MARGEN, y, size: 10, font: helvetica, color: NEGRO }
-      );
-      y -= 15;
-      dibujadas += 1;
-    }
+    escribirContenido(
+      portada,
+      fuentes,
+      y,
+      fechas.map((fecha) => ({
+        fecha,
+        detalle: `${porFecha[fecha]} archivo${porFecha[fecha] === 1 ? '' : 's'}`,
+      }))
+    );
   }
 
   const buffer = Buffer.from(await doc.save());
   return { buffer, incluidos, omitidos };
 }
 
-module.exports = { construirExpedientePdf, formatearFecha, soloFecha };
+module.exports = {
+  construirExpedientePdf,
+  agregarArchivosAlPdf,
+  agregarPaginaOmitidos,
+  escribirContenido,
+  formatearFecha,
+  soloFecha,
+};

@@ -69,9 +69,13 @@ const patientExists = async (patientId) => {
   return rows.length > 0;
 };
 
-// GET /  -> lista de expedientes del paciente (sin el JSON completo).
-// Para la lista del historial solo hace falta la cabecera + un resumen, así que
-// se extraen del JSON los dos campos que se muestran en la tarjeta.
+// GET /  -> lista de expedientes del paciente.
+// Incluye `form_data` completo porque la lista muestra cuántos pasos van
+// contestados, y esa regla vive en el front (components/expediente-clinico/
+// completitud.js). Calcularla aquí obligaría a mantener la misma lógica en dos
+// lenguajes; el costo es bajo: son pocos expedientes por paciente y el JSON
+// pesa unos cuantos KB. `motivo_consulta` y `diagnostico` se conservan
+// extraídos para no cambiar lo que ya consume la tarjeta.
 router.get(
   '/',
   asyncHandler(async (req, res) => {
@@ -85,6 +89,7 @@ router.get(
          status,
          created_at,
          updated_at,
+         form_data,
          JSON_UNQUOTE(JSON_EXTRACT(form_data, '$.motivoConsulta')) AS motivo_consulta,
          JSON_UNQUOTE(JSON_EXTRACT(form_data, '$.diagnostico'))    AS diagnostico
        FROM clinical_records
@@ -93,7 +98,7 @@ router.get(
       [patientId]
     );
 
-    res.json(rows);
+    res.json(rows.map((row) => ({ ...row, form_data: parseFormData(row.form_data) })));
   })
 );
 

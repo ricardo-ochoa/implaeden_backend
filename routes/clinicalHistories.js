@@ -4,10 +4,25 @@ const db = require('../config/db');
 const { s3, S3_BUCKET, publicUrl } = require('../config/s3'); // MinIO (dev) o AWS S3 (prod)
 const multer = require('multer');
 const { construirExpedientePdf } = require('../services/expedientePdf');
+const { construirHistorialPdf } = require('../services/historialPdf');
 
 // Middleware para manejar errores
 const asyncHandler = (fn) => (req, res, next) => {
   Promise.resolve(fn(req, res, next)).catch(next);
+};
+
+// mysql2 devuelve las columnas JSON ya parseadas o como string según la
+// versión del driver; el PDF necesita el objeto en ambos casos.
+const parseFormData = (valor) => {
+  if (valor && typeof valor === 'object' && !Array.isArray(valor)) return valor;
+  if (typeof valor === 'string') {
+    try {
+      return JSON.parse(valor);
+    } catch {
+      return {};
+    }
+  }
+  return {};
 };
 
 // Cliente S3/MinIO: importado arriba (config/s3)
@@ -49,9 +64,15 @@ router.get(
   })
 );
 
-// Descargar los archivos escaneados como un solo PDF.
-//   GET /:patientId/pdf                     -> todo el historial
-//   GET /:patientId/pdf?date=YYYY-MM-DD     -> solo ese registro
+// Descargar el historial como un solo PDF.
+//   GET /:patientId/pdf                     -> TODO: expedientes capturados en
+//                                              la app + archivos escaneados
+//   GET /:patientId/pdf?date=YYYY-MM-DD     -> solo los archivos de esa fecha
+//
+// La versión con `date` la usa el botón de descarga de una fila de archivos, y
+// por eso sigue trayendo únicamente escaneados: el expediente digital de ese
+// mismo día tiene su propio botón en su fila.
+//
 // El orden es cronológico ascendente (del más viejo al más nuevo), como se
 // archiva el expediente en papel; dentro de una fecha, por orden de subida.
 router.get(
@@ -77,15 +98,28 @@ router.get(
       date ? [patientId, date] : [patientId]
     );
 
-    if (registros.length === 0) {
-      return res.status(404).json({ error: 'No hay archivos que descargar.' });
+    // Descarga completa: se suman los expedientes digitales.
+    const expedientes = [];
+    if (!date) {
+      const [filas] = await db.query(
+        `SELECT id, record_date, status, form_data
+         FROM clinical_records
+         WHERE patient_id = ?
+         ORDER BY record_date ASC, id ASC`,
+        [patientId]
+      );
+      expedientes.push(...filas.map((f) => ({ ...f, form_data: parseFormData(f.form_data) })));
     }
 
-    const { buffer, incluidos, omitidos } = await construirExpedientePdf({
-      paciente: pacientes[0],
-      registros,
-      fechaUnica: date,
-    });
+    if (registros.length === 0 && expedientes.length === 0) {
+      return res.status(404).json({
+        error: date ? 'No hay archivos que descargar.' : 'No hay expedientes ni archivos que descargar.',
+      });
+    }
+
+    const { buffer, incluidos, omitidos } = date
+      ? await construirExpedientePdf({ paciente: pacientes[0], registros, fechaUnica: date })
+      : await construirHistorialPdf({ paciente: pacientes[0], expedientes, registros });
 
     const apellido = String(pacientes[0].apellidos || '')
       .normalize('NFD')
@@ -94,7 +128,9 @@ router.get(
       .replace(/^-|-$/g, '')
       .toLowerCase();
 
-    const nombreDescarga = `expediente-${apellido || patientId}-${date || 'completo'}.pdf`;
+    const nombreDescarga = date
+      ? `expediente-${apellido || patientId}-${date}.pdf`
+      : `historial-clinico-${apellido || patientId}.pdf`;
 
     // Los omitidos también van en la cabecera: el front avisa al usuario sin
     // tener que abrir el PDF hasta la última página.

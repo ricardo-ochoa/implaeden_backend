@@ -35,7 +35,10 @@ const {
 } = require('./expedienteCatalogos');
 
 // El wizard guarda tri-estado: true / false / null (sin responder).
-const siNo = (valor) => (valor === true ? 'Sí' : valor === false ? 'No' : 'Sin responder');
+// 'na' lo escribe el front en las preguntas obligatorias que no le corresponden
+// al paciente (§8 gineco-obstétricos); es distinto de un "No" y de un vacío.
+const siNo = (valor) =>
+  valor === true ? 'Sí' : valor === false ? 'No' : valor === 'na' ? 'No aplica' : 'Sin responder';
 
 const texto = (valor) => {
   const limpio = String(valor ?? '').trim();
@@ -180,9 +183,12 @@ function dibujarOdontograma(lienzo, odontograma, titulo) {
 /**
  * @param {object} paciente   fila de `pacientes`
  * @param {object} expediente fila de `clinical_records` (form_data ya parseado)
+ * @param {boolean} [incluirPortada=true] false cuando este expediente se
+ *   encadena dentro del PDF del historial completo: ahí la portada es una sola,
+ *   al frente, y el encabezado de cada página ya lleva paciente y fecha.
  * @returns {Promise<Buffer>}
  */
-async function construirExpedienteClinicoPdf({ paciente, expediente }) {
+async function construirExpedienteClinicoPdf({ paciente, expediente, incluirPortada = true }) {
   const doc = await PDFDocument.create();
   const fuentes = await cargarFuentes(doc);
 
@@ -225,6 +231,12 @@ async function construirExpedienteClinicoPdf({ paciente, expediente }) {
     }),
     [280, 70, 149]
   );
+  // Deja constancia de que sí se interrogó: cuatro "No" seguidos podrían leerse
+  // como un renglón que nadie llenó.
+  if (datos.heredofamiliaresSinAntecedentes === true) {
+    lienzo.espacio(4);
+    lienzo.parrafo('El paciente no refiere antecedentes heredofamiliares.');
+  }
   if (texto(datos.heredofamiliaresOtros)) {
     lienzo.espacio(4);
     lienzo.campo('Otros', datos.heredofamiliaresOtros);
@@ -385,23 +397,25 @@ async function construirExpedienteClinicoPdf({ paciente, expediente }) {
   lienzo.y -= 24;
 
   // Portada al frente, con el mismo diseño que el PDF de escaneados.
-  const portada = doc.insertPage(0, [A4.ancho, A4.alto]);
-  const estado = expediente?.status === 'completado' ? 'Completado' : 'Borrador';
+  if (incluirPortada) {
+    const portada = doc.insertPage(0, [A4.ancho, A4.alto]);
+    const estado = expediente?.status === 'completado' ? 'Completado' : 'Borrador';
 
-  await escribirPortada(doc, portada, fuentes, {
-    titulo: 'Expediente clínico',
-    paciente: nombrePaciente,
-    lineas: [
-      'Formato FO-CD-00003 · REV:00 · captura digital',
-      `Consulta del ${formatearFecha(fechaConsulta)} · ${estado}`,
-      texto(datos.odontologoNombre)
-        ? `Odontólogo: ${texto(datos.odontologoNombre)}${
-            texto(datos.odontologoCedula) ? ` · Céd. prof. ${texto(datos.odontologoCedula)}` : ''
-          }`
-        : null,
-      `Generado el ${formatearFecha(hoyYMD())}`,
-    ].filter(Boolean),
-  });
+    await escribirPortada(doc, portada, fuentes, {
+      titulo: 'Expediente clínico',
+      paciente: nombrePaciente,
+      lineas: [
+        'Formato FO-CD-00003 · REV:00 · captura digital',
+        `Consulta del ${formatearFecha(fechaConsulta)} · ${estado}`,
+        texto(datos.odontologoNombre)
+          ? `Odontólogo: ${texto(datos.odontologoNombre)}${
+              texto(datos.odontologoCedula) ? ` · Céd. prof. ${texto(datos.odontologoCedula)}` : ''
+            }`
+          : null,
+        `Generado el ${formatearFecha(hoyYMD())}`,
+      ].filter(Boolean),
+    });
+  }
 
   return Buffer.from(await doc.save());
 }
