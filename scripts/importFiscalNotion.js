@@ -99,12 +99,29 @@ const soloDigitos = (s) => String(s || '').replace(/\D/g, '');
 // Lectura del export
 // ---------------------------------------------------------------------------
 function leerExport(dir) {
+  if (!fs.existsSync(dir)) {
+    throw new Error(
+      `No existe la carpeta del export:\n    ${dir}\n\n` +
+        `  Cópiala al servidor y pásala con --dir (ruta relativa o absoluta).\n` +
+        `  Debe contener el CSV "*_all.csv" y la carpeta "Facturas Pacientes".`
+    );
+  }
+
+  if (!fs.statSync(dir).isDirectory()) {
+    throw new Error(`--dir debe apuntar a una carpeta, no a un archivo:\n    ${dir}`);
+  }
+
   const csvPath = fs
     .readdirSync(dir)
     .filter((f) => f.toLowerCase().endsWith('_all.csv'))
     .map((f) => path.join(dir, f))[0];
 
-  if (!csvPath) throw new Error(`No se encontró el CSV *_all.csv en ${dir}`);
+  if (!csvPath) {
+    throw new Error(
+      `No se encontró ningún "*_all.csv" en:\n    ${dir}\n\n` +
+        `  Contenido: ${fs.readdirSync(dir).slice(0, 8).join(', ') || '(vacía)'}`
+    );
+  }
 
   const filas = parseCSV(fs.readFileSync(csvPath, 'utf8').replace(/^﻿/, ''));
   const head = filas[0].map((h) => h.trim());
@@ -485,6 +502,16 @@ function partirNombre(completo) {
   // colgado (con el riesgo de que alguien lo corte a media importación).
   await require('../config/db').end();
 })().catch((e) => {
-  console.error(e);
+  // Los errores esperables (carpeta que no está, CSV que falta, base que no
+  // responde) se explican en una línea; el stack completo solo estorba.
+  console.error(`\n✖ ${e.message}`);
+  if (e.code === 'ECONNREFUSED' || e.code === 'ETIMEDOUT' || e.code === 'ENOTFOUND') {
+    console.error(
+      `\n  No se pudo conectar a la base en ${cfg.host}:${cfg.port}.\n` +
+        `  Si corres esto EN el NAS, usa DB_HOST=127.0.0.1 (la IP externa cambia con DHCP).\n` +
+        `  Si lo corres DENTRO del contenedor del backend, no pases DB_* : ya vienen del compose.`
+    );
+  }
+  if (process.env.DEBUG) console.error(e);
   process.exit(1);
 });
