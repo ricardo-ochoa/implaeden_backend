@@ -20,6 +20,8 @@ const pacienteRoutes = require("./routes/pacientes");
 const clinicalHistoryRoutes = require("./routes/clinicalHistories");
 const clinicalRecordRoutes = require("./routes/clinicalRecords");
 const doctorRoutes = require("./routes/doctors");
+const fiscalRoutes = require("./routes/fiscal");
+const fiscalPublicoRoutes = require("./routes/fiscalPublico");
 const servicioRoutes = require("./routes/servicios");
 const emailRoutes = require("./routes/email");
 
@@ -103,6 +105,9 @@ app.use("/api", (req, res, next) => {
 app.use("/api/auth", authRoutes);
 app.use("/api/test", testRoutes);
 app.use("/api/uploads", uploadRoutes);
+// Sin auth a propósito: el token del link privado es la credencial. Va con las
+// públicas para que ningún middleware de sesión lo bloquee.
+app.use("/api/constancia-fiscal", fiscalPublicoRoutes);
 
 /**
  * =========================
@@ -123,6 +128,7 @@ app.use("/api/cobranza", authenticateJwt, cobranzaRoutes);
  * =========================
  */
 app.use("/api/pacientes/:patientId/expediente", authenticateJwt, clinicalRecordRoutes);
+app.use("/api/pacientes/:patientId/fiscal", authenticateJwt, fiscalRoutes);
 app.use("/api/pacientes/:patientId/pagos", authenticateJwt, paymentsRoutes);
 app.use("/api/pacientes/:patientId/citas", authenticateJwt, citasRoutes);
 app.use("/api/pacientes/:patientId/events", authenticateJwt, patientTreatmentEventsRoutes);
