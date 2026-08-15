@@ -95,6 +95,96 @@ const normalizarCorreo = (s) => String(s || '').trim().toLowerCase() || null;
 
 const soloDigitos = (s) => String(s || '').replace(/\D/g, '');
 
+/**
+ * Resuelve una ruta relativa del CSV contra el disco, tolerando la diferencia
+ * de normalización Unicode.
+ *
+ * macOS guarda los nombres de archivo en NFD ("Jiménez" = e + acento) y Linux
+ * en NFC (é como un solo carácter). El CSV de Notion viene en NFC. En la Mac no
+ * se nota porque el sistema de archivos normaliza al buscar; tras copiar al NAS,
+ * `existsSync` falla en todo lo que lleve acento aunque el archivo esté ahí.
+ *
+ * Por eso se camina segmento por segmento: si el nombre exacto no está, se
+ * busca en el directorio una entrada cuya forma NFC coincida.
+ *
+ * @returns {string|null} ruta real en disco, o null si de verdad no existe
+ */
+function resolverRuta(base, relativo) {
+  let actual = base;
+
+  for (const segmento of relativo.split('/').filter(Boolean)) {
+    const directo = path.join(actual, segmento);
+    if (fs.existsSync(directo)) {
+      actual = directo;
+      continue;
+    }
+
+    let entradas;
+    try {
+      entradas = fs.readdirSync(actual);
+    } catch {
+      return null;
+    }
+
+    const buscado = segmento.normalize('NFC');
+    let encontrado = entradas.find((e) => e.normalize('NFC') === buscado);
+
+    // Segundo intento, sin distinguir mayúsculas: Notion generó carpetas que
+    // solo difieren en capitalización ("ADRIANA CRUZ DE LA CRUZ" vs "Adriana
+    // Cruz De la Cruz"). APFS las colapsa en una sola y Linux no las encuentra.
+    if (!encontrado) {
+      const buscadoMin = buscado.toLowerCase();
+      encontrado = entradas.find((e) => e.normalize('NFC').toLowerCase() === buscadoMin);
+    }
+
+    if (!encontrado) return null;
+
+    actual = path.join(actual, encontrado);
+  }
+
+  return actual;
+}
+
+// Palabras que no distinguen a nadie al comparar nombres.
+const PARTICULAS_NOMBRE = new Set(['de', 'del', 'la', 'las', 'los', 'y', 'san', 'santa', 'da', 'do']);
+
+// Devuelve palabras ÚNICAS. Deduplicar es imprescindible: hay pacientes con el
+// apellido repetido ("ROCIO DEL CARMEN JIMENEZ JIMENEZ") y sin esto cualquier
+// persona apellidada Jiménez sacaba 2 coincidencias con un solo apellido en
+// común, arrastrando a media lista hacia el mismo expediente.
+const tokensNombre = (s) => [
+  ...new Set(
+    norm(s)
+      .split(' ')
+      .filter((w) => w.length >= 3 && !PARTICULAS_NOMBRE.has(w))
+  ),
+];
+
+/**
+ * ¿Dos nombres pueden ser de la misma persona?
+ *
+ * Existe porque emparejar SOLO por correo o teléfono produjo falsos positivos
+ * reales en producción ("FIDEL TORRUCO MAY" -> "ADDY GOMEZ REAL" por correo;
+ * "Hugo Arturo Arellano Pérez" -> "Paulina Carrillo Sanchez" por teléfono):
+ * parejas y familiares comparten contacto, o alguien pagó por otro. Colgar la
+ * constancia fiscal de una persona en el expediente de otra es de lo peor que
+ * podría hacer este script, así que el contacto ya no basta por sí solo.
+ */
+function nombresCompatibles(a, b) {
+  const ta = new Set(tokensNombre(a));
+  const tb = tokensNombre(b);
+  if (ta.size === 0 || tb.length === 0) return false;
+
+  const comunes = tb.filter((w) => ta.has(w)).length;
+  return comunes >= Math.min(2, ta.size, tb.length);
+}
+
+// Cuántos tokens comparten, para ordenar candidatos dudosos.
+const tokensEnComun = (a, b) => {
+  const ta = new Set(tokensNombre(a));
+  return tokensNombre(b).filter((w) => ta.has(w)).length;
+};
+
 // ---------------------------------------------------------------------------
 // Lectura del export
 // ---------------------------------------------------------------------------
@@ -167,9 +257,9 @@ function leerExport(dir) {
     for (const parte of celda.split(', ')) {
       const rel = decodeURIComponent(parte.trim());
       if (!rel) continue;
-      const abs = path.join(dir, rel);
-      if (fs.existsSync(abs)) actual.archivos.add(abs);
-      else actual.archivos.add(`__FALTA__${abs}`);
+      const abs = resolverRuta(dir, rel);
+      if (abs) actual.archivos.add(abs);
+      else actual.archivos.add(`__FALTA__${path.join(dir, rel)}`);
     }
 
     porPaciente.set(clave, actual);
@@ -192,35 +282,58 @@ function emparejar(registro, pacientes, correosCompartidos) {
   // una sola persona dentro del export. En los datos hay familiares que
   // comparten correo (madre e hijo con el mismo hotmail): emparejar por ahí
   // colgaría la constancia de uno en el expediente del otro.
-  for (const correo of registro.correos) {
-    if (correosCompartidos.has(correo)) continue;
-    const porCorreo = pacientes.filter((p) => normalizarCorreo(p.email) === correo);
-    if (porCorreo.length === 1) return { paciente: porCorreo[0], via: 'correo' };
-    if (porCorreo.length > 1) return { ambiguo: porCorreo, via: 'correo' };
-  }
+  const nombreCompleto = (p) => `${p.nombre} ${p.apellidos || ''}`;
 
-  // 2) nombre completo normalizado
+  // 1) nombre completo normalizado: la única señal que se acepta sola.
   const clave = norm(registro.nombre);
-  const exactos = pacientes.filter((p) => norm(`${p.nombre} ${p.apellidos || ''}`) === clave);
+  const exactos = pacientes.filter((p) => norm(nombreCompleto(p)) === clave);
   if (exactos.length === 1) return { paciente: exactos[0], via: 'nombre' };
   if (exactos.length > 1) return { ambiguo: exactos, via: 'nombre' };
 
-  // 3) teléfono
-  for (const tel of registro.telefonos) {
-    const porTel = pacientes.filter((p) => soloDigitos(p.telefono).endsWith(tel.slice(-10)));
-    if (porTel.length === 1) return { paciente: porTel[0], via: 'teléfono' };
+  // 2) correo, pero SOLO si el nombre corrobora. Sin esa condición se producen
+  // falsos positivos entre familiares que comparten cuenta.
+  for (const correo of registro.correos) {
+    if (correosCompartidos.has(correo)) continue;
+    const porCorreo = pacientes.filter((p) => normalizarCorreo(p.email) === correo);
+    if (porCorreo.length === 0) continue;
+
+    const compatibles = porCorreo.filter((p) => nombresCompatibles(registro.nombre, nombreCompleto(p)));
+    if (compatibles.length === 1) return { paciente: compatibles[0], via: 'correo + nombre' };
+    if (compatibles.length > 1) return { ambiguo: compatibles, via: 'correo + nombre' };
+
+    // Correo igual pero nombre distinto: casi siempre es otra persona del mismo
+    // hogar. Se manda a revisión, nunca se aplica solo.
+    return { dudoso: porCorreo[0], via: 'correo, pero el nombre NO coincide' };
   }
 
-  // 4) todas las palabras del nombre del CSV aparecen en el del paciente.
-  // Es una pista, no una certeza: se reporta como dudoso y no se aplica solo.
-  const palabras = clave.split(' ').filter((w) => w.length > 2);
-  if (palabras.length >= 2) {
-    const parciales = pacientes.filter((p) => {
-      const completo = norm(`${p.nombre} ${p.apellidos || ''}`);
-      return palabras.every((w) => completo.includes(w));
-    });
-    if (parciales.length === 1) return { dudoso: parciales[0], via: 'nombre parcial' };
-    if (parciales.length > 1) return { ambiguo: parciales, via: 'nombre parcial' };
+  // 3) teléfono, con la misma exigencia de corroboración.
+  for (const tel of registro.telefonos) {
+    if (tel.length < 10) continue;
+    const porTel = pacientes.filter((p) => soloDigitos(p.telefono).endsWith(tel.slice(-10)));
+    if (porTel.length === 0) continue;
+
+    const compatibles = porTel.filter((p) => nombresCompatibles(registro.nombre, nombreCompleto(p)));
+    if (compatibles.length === 1) return { paciente: compatibles[0], via: 'teléfono + nombre' };
+    if (compatibles.length > 1) return { ambiguo: compatibles, via: 'teléfono + nombre' };
+
+    return { dudoso: porTel[0], via: 'teléfono, pero el nombre NO coincide' };
+  }
+
+  // 4) parecido de nombre: nunca se aplica solo, pero evita crear duplicados de
+  // pacientes que ya existen escritos distinto. Se ofrece el mejor candidato.
+  const candidatos = pacientes
+    .map((p) => ({ p, puntos: tokensEnComun(registro.nombre, nombreCompleto(p)) }))
+    .filter((c) => c.puntos >= 2)
+    .sort((a, b) => b.puntos - a.puntos);
+
+  if (candidatos.length === 1) {
+    return { dudoso: candidatos[0].p, via: `nombre parecido (${candidatos[0].puntos} palabras)` };
+  }
+  if (candidatos.length > 1) {
+    return {
+      ambiguo: candidatos.slice(0, 4).map((c) => c.p),
+      via: `nombre parecido (${candidatos[0].puntos} palabras el mejor)`,
+    };
   }
 
   return { nuevo: true };
@@ -328,7 +441,12 @@ function partirNombre(completo) {
   if (resultado.ambiguos.length) {
     console.log('\n== AMBIGUOS (varios candidatos) ==');
     resultado.ambiguos.forEach((x) =>
-      console.log(linea(x, ` -> ${x.ambiguo.map((p) => `#${p.id}`).join(', ')} (por ${x.via})`))
+      console.log(
+        linea(
+          x,
+          ` -> ${x.ambiguo.map((p) => `#${p.id} ${p.nombre} ${p.apellidos || ''}`.trim()).join('  |  ')} (por ${x.via})`
+        )
+      )
     );
   }
   if (resultado.nuevos.length) {
@@ -369,8 +487,15 @@ function partirNombre(completo) {
     // Dudosos y ambiguos entran como 'revisar': no se aplican hasta que
     // alguien escriba a mano 'asociar' + el id correcto, o 'crear'.
     resultado.dudosos.forEach((x) => agregar(x.reg, 'revisar', x.dudoso, x.via));
+    // Para los ambiguos se listan los candidatos CON NOMBRE: solo con los ids
+    // habría que ir a buscarlos uno por uno a la base para poder decidir.
     resultado.ambiguos.forEach((x) =>
-      agregar(x.reg, 'revisar', null, `${x.via}: candidatos ${x.ambiguo.map((p) => p.id).join(' / ')}`)
+      agregar(
+        x.reg,
+        'revisar',
+        null,
+        `${x.via}: ${x.ambiguo.map((p) => `#${p.id} ${p.nombre} ${p.apellidos || ''}`.trim()).join(' | ')}`
+      )
     );
     resultado.nuevos.forEach((x) => agregar(x.reg, 'crear', null, ''));
 
@@ -401,6 +526,7 @@ function partirNombre(completo) {
   let subidos = 0;
   let fallidos = 0;
   let omitidos = 0;
+  let repetidos = 0;
 
   let aImportar;
 
@@ -476,6 +602,24 @@ function partirNombre(completo) {
     for (const abs of item.reg.archivos) {
       try {
         const buffer = fs.readFileSync(abs);
+
+        // Idempotencia: la key en el bucket lleva timestamp + aleatorio, así que
+        // el UNIQUE de file_key no protege de re-correr el import (crearía
+        // duplicados de los 110 archivos). Se compara por nombre y tamaño
+        // dentro de lo ya migrado para ese paciente. Importa porque la revisión
+        // se hace en pasadas: primero lo claro, luego lo dudoso.
+        const [yaEsta] = await conn.query(
+          `SELECT id FROM patient_fiscal_documents
+           WHERE patient_id = ? AND origen = 'import' AND file_name = ? AND size_bytes = ?
+           LIMIT 1`,
+          [patientId, path.basename(abs), buffer.length]
+        );
+
+        if (yaEsta.length) {
+          repetidos++;
+          continue;
+        }
+
         await guardarConstancia({
           patientId,
           file: {
@@ -494,7 +638,7 @@ function partirNombre(completo) {
     }
   }
 
-  console.log(`\nHecho. Pacientes creados: ${creados} · archivos subidos: ${subidos} · fallidos: ${fallidos} · omitidos: ${omitidos}`);
+  console.log(`\nHecho. Pacientes creados: ${creados} · archivos subidos: ${subidos} · ya estaban: ${repetidos} · fallidos: ${fallidos} · omitidos: ${omitidos}`);
 
   await conn.end();
   // services/fiscalDocs usa el pool de config/db, que mantiene vivo el event
