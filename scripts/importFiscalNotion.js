@@ -24,6 +24,9 @@ const flag = (nombre, porDefecto = null) => {
 };
 const APLICAR = args.includes('--apply');
 const DIR = path.resolve(flag('dir', path.join(__dirname, '..', '..', 'ExportBlock-notion')));
+// Hoja de revisión: --out la escribe, --from-csv la lee para aplicar solo lo aprobado.
+const SALIDA = flag('out');
+const DESDE_CSV = flag('from-csv');
 
 if (!process.env.DB_HOST) {
   const env = process.env.NODE_ENV || 'development';
@@ -320,32 +323,123 @@ function partirNombre(completo) {
     });
   }
 
+  // --- Hoja de revisión ----------------------------------------------------
+  // 52 personas no se validan leyendo la terminal. Con --out se escribe un CSV
+  // con la decisión ya sugerida para revisarlo en Excel; luego se aplica
+  // exactamente lo aprobado con --from-csv.
+  if (SALIDA) {
+    const filas = [
+      ['nombre_export', 'archivos', 'correo', 'telefono', 'decision', 'paciente_id', 'paciente_sugerido', 'via', 'nombre_nuevo', 'apellidos_nuevos'],
+    ];
+
+    const agregar = (reg, decision, paciente, via) => {
+      const { nombre, apellidos } = partirNombre(reg.nombre);
+      filas.push([
+        reg.nombre,
+        reg.archivos.length,
+        reg.correos[0] || '',
+        reg.telefonos[0] || '',
+        decision,
+        paciente ? paciente.id : '',
+        paciente ? `${paciente.nombre} ${paciente.apellidos || ''}`.trim() : '',
+        via || '',
+        decision === 'crear' ? nombre : '',
+        decision === 'crear' ? apellidos || '' : '',
+      ]);
+    };
+
+    resultado.emparejados.forEach((x) => agregar(x.reg, 'asociar', x.paciente, x.via));
+    // Dudosos y ambiguos entran como 'revisar': no se aplican hasta que
+    // alguien escriba a mano 'asociar' + el id correcto, o 'crear'.
+    resultado.dudosos.forEach((x) => agregar(x.reg, 'revisar', x.dudoso, x.via));
+    resultado.ambiguos.forEach((x) =>
+      agregar(x.reg, 'revisar', null, `${x.via}: candidatos ${x.ambiguo.map((p) => p.id).join(' / ')}`)
+    );
+    resultado.nuevos.forEach((x) => agregar(x.reg, 'crear', null, ''));
+
+    const escapar = (v) => {
+      const s = String(v ?? '');
+      return /[",\n]/.test(s) ? `"${s.replace(/"/g, '""')}"` : s;
+    };
+
+    // BOM para que Excel abra los acentos bien.
+    fs.writeFileSync(SALIDA, '﻿' + filas.map((f) => f.map(escapar).join(',')).join('\n'), 'utf8');
+    console.log(`\nHoja de revisión escrita en: ${SALIDA}`);
+    console.log('  Columna "decision": asociar | crear | omitir | revisar');
+    console.log('  Para los "revisar", pon asociar + el paciente_id correcto, o crear.');
+    console.log(`  Después: node scripts/importFiscalNotion.js --dir "${path.relative(process.cwd(), DIR)}" --from-csv "${SALIDA}" --apply`);
+  }
+
   if (!APLICAR) {
-    console.log('\nNada se escribió. Revisa el reporte y vuelve a correr con --apply.');
+    console.log('\nNada se escribió en la base ni en el bucket.');
+    if (!SALIDA) console.log('Tip: agrega --out revision.csv para validar los pacientes en Excel.');
     await conn.end();
     return;
   }
 
   // --- Aplicar -------------------------------------------------------------
-  // Se importan los emparejados y los nuevos. Los dudosos y ambiguos se dejan
-  // fuera a propósito: asociar la constancia fiscal de alguien al paciente
-  // equivocado es peor que no importarla.
   const { guardarConstancia } = require('../services/fiscalDocs');
 
   let creados = 0;
   let subidos = 0;
   let fallidos = 0;
+  let omitidos = 0;
 
-  const aImportar = [
-    ...resultado.emparejados.map((x) => ({ reg: x.reg, patientId: x.paciente.id })),
-    ...resultado.nuevos.map((x) => ({ reg: x.reg, patientId: null })),
-  ];
+  let aImportar;
+
+  if (DESDE_CSV) {
+    // Manda la hoja revisada: solo se hace lo que quedó aprobado ahí.
+    const revisadas = parseCSV(fs.readFileSync(DESDE_CSV, 'utf8').replace(/^﻿/, ''));
+    const cab = revisadas[0].map((h) => h.trim());
+    const col = (n) => cab.indexOf(n);
+    const porNombre = new Map(registros.map((r) => [norm(r.nombre), r]));
+
+    aImportar = [];
+
+    for (const fila of revisadas.slice(1)) {
+      if (!fila || fila.length < 2) continue;
+
+      const reg = porNombre.get(norm(fila[col('nombre_export')]));
+      if (!reg) continue;
+
+      const decision = String(fila[col('decision')] || '').trim().toLowerCase();
+      const pid = Number(fila[col('paciente_id')]) || null;
+
+      if (decision === 'asociar' && pid) {
+        aImportar.push({ reg, patientId: pid });
+      } else if (decision === 'crear') {
+        aImportar.push({
+          reg,
+          patientId: null,
+          nombre: (fila[col('nombre_nuevo')] || '').trim() || null,
+          apellidos: (fila[col('apellidos_nuevos')] || '').trim() || null,
+        });
+      } else {
+        omitidos++;
+      }
+    }
+
+    console.log(`\nSegún la hoja revisada: ${aImportar.length} a importar, ${omitidos} omitidos.`);
+  } else {
+    // Sin hoja: solo lo inequívoco. Dudosos y ambiguos se quedan fuera a
+    // propósito: colgar la constancia de alguien en el expediente equivocado
+    // es peor que no importarla.
+    aImportar = [
+      ...resultado.emparejados.map((x) => ({ reg: x.reg, patientId: x.paciente.id })),
+      ...resultado.nuevos.map((x) => ({ reg: x.reg, patientId: null })),
+    ];
+    omitidos = resultado.dudosos.length + resultado.ambiguos.length;
+  }
 
   for (const item of aImportar) {
     let patientId = item.patientId;
 
     if (!patientId) {
-      const { nombre, apellidos } = partirNombre(item.reg.nombre);
+      // La hoja revisada puede traer el nombre corregido a mano; si no, se usa
+      // la partición heurística.
+      const heuristico = partirNombre(item.reg.nombre);
+      const nombre = item.nombre || heuristico.nombre;
+      const apellidos = item.apellidos ?? heuristico.apellidos;
       // `telefono` es NOT NULL en el esquema; los que no traen teléfono entran
       // con cadena vacía y registro_incompleto = 1, igual que el alta rápida.
       const telefono = item.reg.telefonos[0] || '';
@@ -383,8 +477,13 @@ function partirNombre(completo) {
     }
   }
 
-  console.log(`\nHecho. Pacientes creados: ${creados} · archivos subidos: ${subidos} · fallidos: ${fallidos}`);
+  console.log(`\nHecho. Pacientes creados: ${creados} · archivos subidos: ${subidos} · fallidos: ${fallidos} · omitidos: ${omitidos}`);
+
   await conn.end();
+  // services/fiscalDocs usa el pool de config/db, que mantiene vivo el event
+  // loop: sin cerrarlo el script termina el trabajo pero nunca sale, y parece
+  // colgado (con el riesgo de que alguien lo corte a media importación).
+  await require('../config/db').end();
 })().catch((e) => {
   console.error(e);
   process.exit(1);

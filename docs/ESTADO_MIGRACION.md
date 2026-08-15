@@ -46,7 +46,7 @@ flowchart TB
 | Público | — | `api.implaeden.com`, `files.implaeden.com` |
 
 - Rutas en el NAS: `/volume1/home/ochoagram/implaeden-dev` y `.../implaeden-prod`.
-- Acceso SSH desde la Mac: alias `mordor` (`192.168.100.10`).
+- Acceso SSH desde la Mac: alias `mordor` (`192.168.100.2`).
 
 ## Cambios de código (backend)
 - `config/s3.js`: cliente S3 compartido → MinIO si hay `S3_ENDPOINT` (path-style), AWS S3 si no.

@@ -29,7 +29,7 @@ lleva control en la tabla `schema_migrations`.
      (usa el env del contenedor: `mysql-prod`).
    - Desde el host, pasando las variables de prod:
      ```bash
-     DB_HOST=192.168.100.10 DB_PORT=3308 DB_USER=implaeden DB_PASSWORD=*** DB_NAME=implaeden npm run migrate
+     DB_HOST=192.168.100.2 DB_PORT=3308 DB_USER=implaeden DB_PASSWORD=*** DB_NAME=implaeden npm run migrate
      ```
 6. Verifica.
 

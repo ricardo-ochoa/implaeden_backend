@@ -21,7 +21,7 @@ flowchart TB
         BEd["backend dev :4000 (nodemon)"]
         FEd["frontend dev :3000"]
     end
-    subgraph NAS["🗄️ NAS Asustor 'Mordor' 192.168.100.10 · Portainer/Docker"]
+    subgraph NAS["🗄️ NAS Asustor 'Mordor' 192.168.100.2 · Portainer/Docker"]
         subgraph SD["stack implaeden-dev"]
             MYd["MySQL :3307"]
             MId["MinIO :9000/:9001"]
@@ -79,7 +79,7 @@ flowchart TB
 
 | Aspecto | Valor |
 |---|---|
-| NAS (LAN) | `192.168.100.10` · alias SSH `mordor` (clave ed25519 de la Mac) |
+| NAS (LAN) | `192.168.100.2` · alias SSH `mordor` (clave ed25519 de la Mac) |
 | Docker en NAS | Docker 28.1.1 + Compose v2.35.1; gestionado por **Portainer** (el usuario no tiene acceso a socket/sudo → deploy vía Portainel) |
 | Puertos DEV | MySQL 3307 · MinIO 9000/9001 · Adminer 8091 · backend(Mac) 4000 · frontend(Mac) 3000 |
 | Puertos PROD | MySQL 3308 · MinIO 9002/9003 · Adminer 8092 · backend 4001 |
