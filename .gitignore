@@ -56,3 +56,9 @@ Thumbs.db
 *.bak
 *.orig
 *.lock
+
+# Datos de pacientes generados por scripts (NO deben entrar al repo).
+# revision.csv trae nombre, correo y teléfono de decenas de personas: se genera
+# con importFiscalNotion.js --out y vive junto al backend en el servidor.
+revision*.csv
+ExportBlock-notion/
