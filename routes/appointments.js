@@ -25,6 +25,26 @@ function respondGcalConfigError(res, err) {
     res.status(500).json({ error: 'Credenciales de Google Calendar inválidas.' });
     return true;
   }
+
+  // `invalid_grant` = el GOOGLE_OAUTH_REFRESH_TOKEN dejó de servir (revocado,
+  // caducado, o la pantalla de consentimiento sigue en modo "Testing", donde
+  // Google mata los refresh tokens cada 7 días).
+  //
+  // Sin esto se iba al handler genérico y la agenda respondía 500
+  // "Ocurrió un error en el servidor / invalid_grant": ni el usuario entiende
+  // qué pasó ni queda claro que la app está bien y lo que falta es reconectar.
+  const mensaje = String(err?.message || '');
+  const respuesta = String(err?.response?.data?.error || '');
+
+  if (mensaje.includes('invalid_grant') || respuesta === 'invalid_grant') {
+    res.status(503).json({
+      error:
+        'La conexión con Google Calendar caducó. Hay que volver a autorizar la cuenta para ver la agenda.',
+      code: 'GCAL_REAUTH_REQUIRED',
+    });
+    return true;
+  }
+
   return false;
 }
 
